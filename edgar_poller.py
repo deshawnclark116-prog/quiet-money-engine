@@ -151,9 +151,12 @@ def poll_latest_filings() -> list[dict]:
 
     records = parse_feed(resp.content)
     seen = _load_seen()
-    new = [r for r in records if r["accession"] not in seen]
-    for r in new:
-        seen.add(r["accession"])
+    new = []
+    for r in records:
+        if r["accession"] in seen:
+            continue  # skip: seen in an earlier cycle OR a duplicate within this same feed
+        seen.add(r["accession"])  # mark immediately so a repeat later in THIS batch is caught
+        new.append(r)
     if new:
         _save_seen(seen)
 
