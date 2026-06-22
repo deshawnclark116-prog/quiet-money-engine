@@ -45,7 +45,10 @@ def get_price_history(ticker: str, days: int = 400) -> list[dict]:
         try:
             r = _polite_get(url, params)
             if r.status_code in (401, 403):
-                log.warning("FMP rejected key (HTTP %s) — check FMP_API_KEY", r.status_code)
+                # Print the URL (key masked) and FMP's message so we can tell
+                # "bad key" apart from "endpoint not on your plan" — both are 403.
+                masked = re.sub(r"apikey=[^&]+", "apikey=***", r.url)
+                log.warning("FMP %s on %s -> %s", r.status_code, masked, r.text[:200])
                 return []
             if r.status_code != 200:
                 continue
