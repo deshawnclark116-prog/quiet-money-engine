@@ -7,6 +7,7 @@ cross-sectional signals are computed from. Defensive across FMP's stable vs v3
 endpoints, throttled to be polite, returns bars oldest -> newest.
 """
 import os
+import re
 import time
 import logging
 
