@@ -6,9 +6,9 @@ Pipeline:
   Stage 1  poll EDGAR for filings
   Stage 2  parse each Form 4, keep only open-market buys
   Stage 3  run each buy's ticker through the tradability gate
+  Stage 5  persist every buy to Postgres (history)
 Buys are grouped by ticker per cycle: a single insider logs as BUY, while
-2+ insiders buying the same name collapse into one CLUSTER line (the stronger
-signal), with an officer count so high-conviction setups stand out.
+2+ insiders buying the same name collapse into one CLUSTER line.
 """
 import os
 import time
@@ -17,6 +17,7 @@ import logging
 from edgar_poller import poll_latest_filings
 from form4_parser import fetch_form4_signal
 from tradability_gate import evaluate as gate_check
+from db import init_db, save_insider_buy
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("worker")
@@ -38,19 +39,33 @@ def run_once() -> None:
 
     for f in filings:
         if f["form"] != "4":
-            # 13D / 13G stake filings — parser for these is the quick next add-on.
             log.info("STAKE %s | %s | %s", f["form"], f["filer"][:40], f["index_url"])
             continue
 
         sig = fetch_form4_signal(f)
         if not sig:
-            continue  # Form 4 with no open-market buy (grant/sale/exercise)
+            continue  # Form 4 with no open-market buy
 
         gate = gate_check(sig["ticker"])
         if not gate["allowed"]:
             blocked += 1
             log.info("SKIP  %-6s | %s | %s", sig["ticker"] or "?", sig["insider"][:20], gate["reason"])
             continue
+
+        # Stage 5: save this buy to the database (history; accession de-dupes)
+        save_insider_buy({
+            "accession": sig.get("accession"),
+            "ticker": sig["ticker"],
+            "exchange": gate["exchange"],
+            "insider": sig["insider"],
+            "role": sig["role"],
+            "shares": sig["buy_shares"],
+            "price": sig["buy_price"],
+            "value": sig["buy_value"],
+            "market_cap": gate["market_cap"],
+            "avg_dollar_vol": gate["avg_dollar_volume"],
+            "filed_at": sig.get("filed_at", ""),
+        })
 
         c = clusters.setdefault(sig["ticker"], {
             "exchange": gate["exchange"],
@@ -59,7 +74,6 @@ def run_once() -> None:
             "buys": [],
         })
         c["buys"].append(sig)
-        # >>> Stage 5: persist to your database <<<
 
     # one line per ticker; clusters (2+ insiders) flagged loud
     for ticker, c in clusters.items():
@@ -92,6 +106,7 @@ def run_once() -> None:
 
 
 def main() -> None:
+    init_db()  # create tables on first run (safe to call every start)
     log.info("Quiet Money worker starting; polling every %ss", POLL_INTERVAL)
     while True:
         try:
