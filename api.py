@@ -196,7 +196,7 @@ def watchlist_runs(
         "items": clean_rows(rows),
     }
     @app.get("/api/debug/schema")
-def debug_schema():
+    def debug_schema():
     sql = """
         SELECT
             table_name,
