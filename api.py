@@ -39,6 +39,14 @@ def qcol(column_name: str) -> str:
     return '"' + column_name.replace('"', '""') + '"'
 
 
+def date_sql_expr(column_name: str) -> str:
+    """
+    filed_at is currently stored as text in the DB.
+    Cast it inside API queries so date filters work.
+    """
+    return f"NULLIF({qcol(column_name)}::text, '')::timestamptz"
+
+
 def clean_value(value: Any):
     if isinstance(value, datetime):
         return value.isoformat()
@@ -318,6 +326,7 @@ def api_status():
             }
 
             if date_col:
+                date_expr = date_sql_expr(date_col)
                 now = datetime.now(timezone.utc)
                 cutoff_24h = now - timedelta(hours=24)
                 cutoff_7d = now - timedelta(days=7)
@@ -327,8 +336,10 @@ def api_status():
                     with conn.cursor() as cur:
                         cur.execute(
                             f"""
-                            SELECT MAX({qcol(date_col)}) AS latest_buy
+                            SELECT MAX({date_expr}) AS latest_buy
                             FROM insider_buys
+                            WHERE {qcol(date_col)} IS NOT NULL
+                              AND {qcol(date_col)}::text <> ''
                             """
                         )
                         latest_buy_row = cur.fetchone()
@@ -337,7 +348,7 @@ def api_status():
                             f"""
                             SELECT COUNT(*) AS n
                             FROM insider_buys
-                            WHERE {qcol(date_col)} >= %s
+                            WHERE {date_expr} >= %s
                             """,
                             [cutoff_24h],
                         )
@@ -347,7 +358,7 @@ def api_status():
                             f"""
                             SELECT COUNT(*) AS n
                             FROM insider_buys
-                            WHERE {qcol(date_col)} >= %s
+                            WHERE {date_expr} >= %s
                             """,
                             [cutoff_7d],
                         )
@@ -357,7 +368,7 @@ def api_status():
                             f"""
                             SELECT COUNT(*) AS n
                             FROM insider_buys
-                            WHERE {qcol(date_col)} >= %s
+                            WHERE {date_expr} >= %s
                             """,
                             [cutoff_30d],
                         )
@@ -384,6 +395,7 @@ def api_status():
                 status["warnings"].append("insider_buys has no usable date column.")
 
             if ticker_col and date_col:
+                date_expr = date_sql_expr(date_col)
                 cutoff_14d = datetime.now(timezone.utc) - timedelta(days=14)
                 insider_expr = qcol(insider_col) if insider_col else qcol(ticker_col)
 
@@ -397,7 +409,7 @@ def api_status():
                                     {qcol(ticker_col)} AS ticker,
                                     COUNT(DISTINCT {insider_expr}) AS insider_count
                                 FROM insider_buys
-                                WHERE {qcol(date_col)} >= %s
+                                WHERE {date_expr} >= %s
                                 GROUP BY {qcol(ticker_col)}
                                 HAVING COUNT(DISTINCT {insider_expr}) >= 2
                             ) x
@@ -490,7 +502,7 @@ def insider_buys(
 
     if date_col:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
-        where_parts.append(f"{qcol(date_col)} >= %s")
+        where_parts.append(f"{date_sql_expr(date_col)} >= %s")
         params.append(cutoff)
 
     if ticker and ticker_col:
@@ -502,13 +514,16 @@ def insider_buys(
     if where_parts:
         where_sql = "WHERE " + " AND ".join(where_parts)
 
-    order_col = date_col or first_existing(columns, ["id", "accession"]) or columns[0]
+    if date_col:
+        order_expr = date_sql_expr(date_col)
+    else:
+        order_expr = qcol(first_existing(columns, ["id", "accession"]) or columns[0])
 
     sql = f"""
         SELECT *
         FROM insider_buys
         {where_sql}
-        ORDER BY {qcol(order_col)} DESC
+        ORDER BY {order_expr} DESC
         LIMIT %s
     """
 
@@ -596,6 +611,7 @@ def clusters(
     insider_expr = qcol(insider_col) if insider_col else qcol(ticker_col)
     value_expr = numeric_sum_expr(value_col)
     shares_expr = numeric_sum_expr(shares_col)
+    date_expr = date_sql_expr(date_col)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -606,10 +622,10 @@ def clusters(
             COUNT(DISTINCT {insider_expr}) AS insider_count,
             {value_expr} AS total_value,
             {shares_expr} AS total_shares,
-            MIN({qcol(date_col)}) AS first_seen,
-            MAX({qcol(date_col)}) AS last_seen
+            MIN({date_expr}) AS first_seen,
+            MAX({date_expr}) AS last_seen
         FROM insider_buys
-        WHERE {qcol(date_col)} >= %s
+        WHERE {date_expr} >= %s
         GROUP BY {qcol(ticker_col)}
         HAVING COUNT(DISTINCT {insider_expr}) >= %s
         ORDER BY insider_count DESC, total_value DESC, last_seen DESC
