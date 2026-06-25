@@ -114,7 +114,15 @@ def require_table(table_name: str) -> List[str]:
 
 
 def safe_count_table(table_name: str) -> int:
-    if table_name not in {"insider_buys", "watchlist_scores"}:
+    allowed = {
+        "insider_buys",
+        "watchlist_scores",
+        "prediction_runs",
+        "prediction_snapshots",
+        "prediction_outcomes",
+    }
+
+    if table_name not in allowed:
         return 0
 
     try:
@@ -177,6 +185,9 @@ def root():
             "/api/clusters",
             "/api/watchlist/latest",
             "/api/watchlist/runs",
+            "/api/predictions/latest",
+            "/api/predictions/runs",
+            "/api/predictions/by-ticker/{ticker}",
             "/api/debug/schema",
         ],
     }
@@ -196,6 +207,7 @@ def api_status():
         "watchlist": {},
         "insider_buys": {},
         "clusters": {},
+        "predictions": {},
     }
 
     try:
@@ -222,11 +234,27 @@ def api_status():
         watchlist_columns = []
         status["warnings"].append(f"Could not inspect watchlist_scores: {str(e)}")
 
+    try:
+        prediction_run_columns = get_table_columns("prediction_runs")
+        prediction_snapshot_columns = get_table_columns("prediction_snapshots")
+        prediction_outcome_columns = get_table_columns("prediction_outcomes")
+    except Exception as e:
+        prediction_run_columns = []
+        prediction_snapshot_columns = []
+        prediction_outcome_columns = []
+        status["warnings"].append(f"Could not inspect prediction tables: {str(e)}")
+
     status["tables"] = {
         "insider_buys_exists": bool(insider_columns),
         "watchlist_scores_exists": bool(watchlist_columns),
+        "prediction_runs_exists": bool(prediction_run_columns),
+        "prediction_snapshots_exists": bool(prediction_snapshot_columns),
+        "prediction_outcomes_exists": bool(prediction_outcome_columns),
         "insider_buys_rows": safe_count_table("insider_buys") if insider_columns else 0,
         "watchlist_scores_rows": safe_count_table("watchlist_scores") if watchlist_columns else 0,
+        "prediction_runs_rows": safe_count_table("prediction_runs") if prediction_run_columns else 0,
+        "prediction_snapshots_rows": safe_count_table("prediction_snapshots") if prediction_snapshot_columns else 0,
+        "prediction_outcomes_rows": safe_count_table("prediction_outcomes") if prediction_outcome_columns else 0,
     }
 
     # Watchlist status
@@ -434,6 +462,54 @@ def api_status():
         status["clusters"]["error"] = str(e)
         status["warnings"].append("Insider-buy status check failed.")
 
+    # Prediction status
+    try:
+        if prediction_run_columns and prediction_snapshot_columns:
+            with get_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT id, run_date, model_version, universe, created_at
+                        FROM prediction_runs
+                        ORDER BY run_date DESC, id DESC
+                        LIMIT 1
+                        """
+                    )
+                    latest_prediction_run = cur.fetchone()
+
+                    cur.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM prediction_snapshots
+                        WHERE run_id = (
+                            SELECT id
+                            FROM prediction_runs
+                            ORDER BY run_date DESC, id DESC
+                            LIMIT 1
+                        )
+                        """
+                    )
+                    latest_snapshot_count = cur.fetchone()["n"]
+
+            status["predictions"] = {
+                "latest_run": clean_value(latest_prediction_run) if latest_prediction_run else None,
+                "latest_snapshot_count": int(latest_snapshot_count),
+                "outcome_count": safe_count_table("prediction_outcomes") if prediction_outcome_columns else 0,
+            }
+
+            if latest_prediction_run is None:
+                status["warnings"].append("No prediction run found.")
+        else:
+            status["predictions"] = {
+                "latest_run": None,
+                "latest_snapshot_count": 0,
+                "error": "Prediction tables missing.",
+            }
+            status["warnings"].append("Prediction tables missing.")
+    except Exception as e:
+        status["predictions"] = {"error": str(e)}
+        status["warnings"].append("Prediction status check failed.")
+
     if status["database_connected"] and not status["warnings"]:
         status["engine_status"] = "healthy"
     elif status["database_connected"]:
@@ -456,7 +532,13 @@ def debug_schema():
             column_name,
             data_type
         FROM information_schema.columns
-        WHERE table_name IN ('insider_buys', 'watchlist_scores')
+        WHERE table_name IN (
+            'insider_buys',
+            'watchlist_scores',
+            'prediction_runs',
+            'prediction_snapshots',
+            'prediction_outcomes'
+        )
         ORDER BY table_name, ordinal_position
     """
 
@@ -766,3 +848,179 @@ def watchlist_runs(
         "count": len(rows),
         "items": clean_rows(rows),
     }
+
+
+# -----------------------------
+# Prediction endpoints
+# -----------------------------
+
+@app.get("/api/predictions/latest")
+def predictions_latest(
+    limit: int = Query(default=50, ge=1, le=500),
+):
+    require_table("prediction_runs")
+    require_table("prediction_snapshots")
+
+    sql = """
+        SELECT
+            ps.id AS snapshot_id,
+            ps.run_id,
+            ps.run_date,
+            ps.ticker,
+            ps.rank,
+            ps.composite,
+            ps.signals,
+            ps.price_at_signal,
+            ps.source,
+            ps.created_at AS snapshot_created_at,
+            pr.model_version,
+            pr.universe,
+            pr.signal_names,
+            pr.notes,
+            pr.created_at AS run_created_at
+        FROM prediction_snapshots ps
+        JOIN prediction_runs pr
+            ON pr.id = ps.run_id
+        WHERE ps.run_id = (
+            SELECT id
+            FROM prediction_runs
+            ORDER BY run_date DESC, id DESC
+            LIMIT 1
+        )
+        ORDER BY ps.rank ASC NULLS LAST, ps.composite DESC NULLS LAST
+        LIMIT %s
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, [limit])
+            rows = cur.fetchall()
+
+    return {
+        "count": len(rows),
+        "items": clean_rows(rows),
+    }
+
+
+@app.get("/api/predictions/runs")
+def predictions_runs(
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    require_table("prediction_runs")
+    require_table("prediction_snapshots")
+
+    sql = """
+        SELECT
+            pr.id,
+            pr.run_date,
+            pr.model_version,
+            pr.universe,
+            pr.signal_names,
+            pr.notes,
+            pr.created_at,
+            COUNT(DISTINCT ps.id) AS snapshot_count,
+            COUNT(DISTINCT po.id) AS outcome_count
+        FROM prediction_runs pr
+        LEFT JOIN prediction_snapshots ps
+            ON ps.run_id = pr.id
+        LEFT JOIN prediction_outcomes po
+            ON po.snapshot_id = ps.id
+        GROUP BY
+            pr.id,
+            pr.run_date,
+            pr.model_version,
+            pr.universe,
+            pr.signal_names,
+            pr.notes,
+            pr.created_at
+        ORDER BY pr.run_date DESC, pr.id DESC
+        LIMIT %s
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, [limit])
+            rows = cur.fetchall()
+
+    return {
+        "count": len(rows),
+        "items": clean_rows(rows),
+    }
+
+
+@app.get("/api/predictions/by-ticker/{ticker}")
+def predictions_by_ticker(
+    ticker: str,
+    limit: int = Query(default=20, ge=1, le=100),
+):
+    require_table("prediction_runs")
+    require_table("prediction_snapshots")
+
+    sql = """
+        SELECT
+            ps.id AS snapshot_id,
+            ps.run_id,
+            ps.run_date,
+            ps.ticker,
+            ps.rank,
+            ps.composite,
+            ps.signals,
+            ps.price_at_signal,
+            ps.source,
+            ps.created_at AS snapshot_created_at,
+            pr.model_version,
+            pr.universe,
+            pr.signal_names,
+            COALESCE(
+                JSON_AGG(
+                    JSON_BUILD_OBJECT(
+                        'horizon_days', po.horizon_days,
+                        'outcome_date', po.outcome_date,
+                        'start_price', po.start_price,
+                        'end_price', po.end_price,
+                        'raw_return', po.raw_return,
+                        'spy_return', po.spy_return,
+                        'excess_return_vs_spy', po.excess_return_vs_spy,
+                        'max_drawdown', po.max_drawdown,
+                        'hit_5pct', po.hit_5pct,
+                        'hit_10pct', po.hit_10pct,
+                        'graded_at', po.graded_at
+                    )
+                    ORDER BY po.horizon_days
+                ) FILTER (WHERE po.id IS NOT NULL),
+                '[]'::json
+            ) AS outcomes
+        FROM prediction_snapshots ps
+        JOIN prediction_runs pr
+            ON pr.id = ps.run_id
+        LEFT JOIN prediction_outcomes po
+            ON po.snapshot_id = ps.id
+        WHERE UPPER(ps.ticker) = UPPER(%s)
+        GROUP BY
+            ps.id,
+            ps.run_id,
+            ps.run_date,
+            ps.ticker,
+            ps.rank,
+            ps.composite,
+            ps.signals,
+            ps.price_at_signal,
+            ps.source,
+            ps.created_at,
+            pr.model_version,
+            pr.universe,
+            pr.signal_names
+        ORDER BY ps.run_date DESC, ps.id DESC
+        LIMIT %s
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, [ticker, limit])
+            rows = cur.fetchall()
+
+    return {
+        "ticker": ticker.upper(),
+        "count": len(rows),
+        "items": clean_rows(rows),
+        }
