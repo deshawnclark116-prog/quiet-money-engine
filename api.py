@@ -70,16 +70,6 @@ def clean_rows(rows):
     return cleaned
 
 
-def clean_one(row):
-    if not row:
-        return None
-
-    item = {}
-    for key, value in dict(row).items():
-        item[key] = clean_value(value)
-    return item
-
-
 def get_table_columns(table_name: str) -> List[str]:
     sql = """
         SELECT column_name
@@ -116,6 +106,9 @@ def require_table(table_name: str) -> List[str]:
 
 
 def safe_count_table(table_name: str) -> int:
+    if table_name not in {"insider_buys", "watchlist_scores"}:
+        return 0
+
     try:
         with get_conn() as conn:
             with conn.cursor() as cur:
@@ -124,10 +117,6 @@ def safe_count_table(table_name: str) -> int:
                 return int(row["n"])
     except Exception:
         return 0
-
-
-def is_weekend_utc() -> bool:
-    return datetime.now(timezone.utc).weekday() >= 5
 
 
 def days_old(value) -> Optional[float]:
@@ -142,9 +131,21 @@ def days_old(value) -> Optional[float]:
     if isinstance(value, datetime):
         if value.tzinfo is None:
             value = value.replace(tzinfo=timezone.utc)
+
         return round((now - value).total_seconds() / 86400, 2)
 
     return None
+
+
+def numeric_sum_expr(column_name: Optional[str]) -> str:
+    if not column_name:
+        return "0"
+
+    return (
+        "SUM(COALESCE("
+        f"NULLIF(REGEXP_REPLACE({qcol(column_name)}::text, '[^0-9.-]', '', 'g'), '')::numeric"
+        ", 0))"
+    )
 
 
 # -----------------------------
@@ -201,8 +202,17 @@ def api_status():
         status["warnings"].append(f"Database connection failed: {str(e)}")
         return status
 
-    insider_columns = get_table_columns("insider_buys")
-    watchlist_columns = get_table_columns("watchlist_scores")
+    try:
+        insider_columns = get_table_columns("insider_buys")
+    except Exception as e:
+        insider_columns = []
+        status["warnings"].append(f"Could not inspect insider_buys: {str(e)}")
+
+    try:
+        watchlist_columns = get_table_columns("watchlist_scores")
+    except Exception as e:
+        watchlist_columns = []
+        status["warnings"].append(f"Could not inspect watchlist_scores: {str(e)}")
 
     status["tables"] = {
         "insider_buys_exists": bool(insider_columns),
@@ -212,178 +222,170 @@ def api_status():
     }
 
     # Watchlist status
-    if watchlist_columns:
-        run_date_col = first_existing(
-            watchlist_columns,
-            [
-                "run_date",
-                "date",
-                "scored_at",
-                "created_at",
-                "saved_at",
-                "inserted_at",
-            ],
-        )
+    try:
+        if watchlist_columns:
+            run_date_col = first_existing(
+                watchlist_columns,
+                [
+                    "run_date",
+                    "date",
+                    "scored_at",
+                    "created_at",
+                    "saved_at",
+                    "inserted_at",
+                ],
+            )
 
-        if run_date_col:
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        SELECT MAX({qcol(run_date_col)}) AS latest_run
-                        FROM watchlist_scores
-                        """
-                    )
-                    latest_row = cur.fetchone()
-
-            latest_run = latest_row["latest_run"]
-
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        SELECT COUNT(*) AS latest_count
-                        FROM watchlist_scores
-                        WHERE {qcol(run_date_col)} = (
-                            SELECT MAX({qcol(run_date_col)})
+            if run_date_col:
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            SELECT MAX({qcol(run_date_col)}) AS latest_run
                             FROM watchlist_scores
+                            """
                         )
-                        """
-                    )
-                    count_row = cur.fetchone()
+                        latest_row = cur.fetchone()
 
-            watchlist_days_old = days_old(latest_run)
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS latest_count
+                            FROM watchlist_scores
+                            WHERE {qcol(run_date_col)} = (
+                                SELECT MAX({qcol(run_date_col)})
+                                FROM watchlist_scores
+                            )
+                            """
+                        )
+                        count_row = cur.fetchone()
 
-            status["watchlist"] = {
-                "latest_run": clean_value(latest_run),
-                "latest_run_days_old": watchlist_days_old,
-                "latest_run_row_count": int(count_row["latest_count"]),
-            }
+                latest_run = latest_row["latest_run"]
 
-            if latest_run is None:
-                status["warnings"].append("No watchlist run found.")
-            elif watchlist_days_old is not None and watchlist_days_old > 3:
-                status["warnings"].append("Watchlist appears stale: latest run is older than 3 days.")
-            elif (
-                watchlist_days_old is not None
-                and watchlist_days_old > 1.5
-                and not is_weekend_utc()
-            ):
-                status["warnings"].append("Watchlist may be stale for a weekday.")
+                status["watchlist"] = {
+                    "latest_run": clean_value(latest_run),
+                    "latest_run_days_old": days_old(latest_run),
+                    "latest_run_row_count": int(count_row["latest_count"]),
+                    "date_column": run_date_col,
+                }
+
+                if latest_run is None:
+                    status["warnings"].append("No watchlist run found.")
+            else:
+                status["watchlist"] = {
+                    "latest_run": None,
+                    "latest_run_row_count": 0,
+                    "error": "No usable run/date column found.",
+                }
+                status["warnings"].append("watchlist_scores has no usable date column.")
         else:
-            status["watchlist"] = {
-                "latest_run": None,
-                "latest_run_row_count": 0,
-                "error": "No usable run/date column found.",
-            }
-            status["warnings"].append("watchlist_scores has no usable date column.")
-    else:
-        status["warnings"].append("watchlist_scores table missing.")
+            status["warnings"].append("watchlist_scores table missing.")
+    except Exception as e:
+        status["watchlist"] = {"error": str(e)}
+        status["warnings"].append("Watchlist status check failed.")
 
     # Insider-buy status
-    if insider_columns:
-        ticker_col = first_existing(insider_columns, ["ticker", "symbol"])
-        date_col = first_existing(
-            insider_columns,
-            [
-                "filed_at",
-                "filing_date",
-                "transaction_date",
-                "created_at",
-                "saved_at",
-                "inserted_at",
-                "updated_at",
-            ],
-        )
-        insider_col = first_existing(
-            insider_columns,
-            [
-                "insider_name",
-                "insider",
-                "filer",
-                "reporting_owner",
-                "owner_name",
-                "name",
-            ],
-        )
-        value_col = first_existing(
-            insider_columns,
-            [
-                "total_value",
-                "value",
-                "dollar_value",
-                "transaction_value",
-                "amount",
-            ],
-        )
+    try:
+        if insider_columns:
+            ticker_col = first_existing(insider_columns, ["ticker", "symbol"])
+            date_col = first_existing(
+                insider_columns,
+                [
+                    "filed_at",
+                    "filing_date",
+                    "transaction_date",
+                    "created_at",
+                    "saved_at",
+                    "inserted_at",
+                    "updated_at",
+                ],
+            )
+            insider_col = first_existing(
+                insider_columns,
+                [
+                    "insider_name",
+                    "insider",
+                    "filer",
+                    "reporting_owner",
+                    "owner_name",
+                    "name",
+                ],
+            )
 
-        if date_col:
-            now = datetime.now(timezone.utc)
-            cutoff_24h = now - timedelta(hours=24)
-            cutoff_7d = now - timedelta(days=7)
-            cutoff_30d = now - timedelta(days=30)
-            cutoff_14d = now - timedelta(days=14)
-
-            with get_conn() as conn:
-                with conn.cursor() as cur:
-                    cur.execute(
-                        f"""
-                        SELECT MAX({qcol(date_col)}) AS latest_buy
-                        FROM insider_buys
-                        """
-                    )
-                    latest_buy_row = cur.fetchone()
-
-                    cur.execute(
-                        f"""
-                        SELECT COUNT(*) AS n
-                        FROM insider_buys
-                        WHERE {qcol(date_col)} >= %s
-                        """,
-                        [cutoff_24h],
-                    )
-                    count_24h = cur.fetchone()["n"]
-
-                    cur.execute(
-                        f"""
-                        SELECT COUNT(*) AS n
-                        FROM insider_buys
-                        WHERE {qcol(date_col)} >= %s
-                        """,
-                        [cutoff_7d],
-                    )
-                    count_7d = cur.fetchone()["n"]
-
-                    cur.execute(
-                        f"""
-                        SELECT COUNT(*) AS n
-                        FROM insider_buys
-                        WHERE {qcol(date_col)} >= %s
-                        """,
-                        [cutoff_30d],
-                    )
-                    count_30d = cur.fetchone()["n"]
-
-            latest_buy = latest_buy_row["latest_buy"]
-            insider_days_old = days_old(latest_buy)
-
-            status["insider_buys"] = {
-                "latest_buy": clean_value(latest_buy),
-                "latest_buy_days_old": insider_days_old,
-                "count_24h": int(count_24h),
-                "count_7d": int(count_7d),
-                "count_30d": int(count_30d),
-                "detected_columns": {
-                    "ticker": ticker_col,
-                    "date": date_col,
-                    "insider": insider_col,
-                    "value": value_col,
-                },
+            status["insider_buys"]["detected_columns"] = {
+                "ticker": ticker_col,
+                "date": date_col,
+                "insider": insider_col,
             }
 
+            if date_col:
+                now = datetime.now(timezone.utc)
+                cutoff_24h = now - timedelta(hours=24)
+                cutoff_7d = now - timedelta(days=7)
+                cutoff_30d = now - timedelta(days=30)
+
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f"""
+                            SELECT MAX({qcol(date_col)}) AS latest_buy
+                            FROM insider_buys
+                            """
+                        )
+                        latest_buy_row = cur.fetchone()
+
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS n
+                            FROM insider_buys
+                            WHERE {qcol(date_col)} >= %s
+                            """,
+                            [cutoff_24h],
+                        )
+                        count_24h = cur.fetchone()["n"]
+
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS n
+                            FROM insider_buys
+                            WHERE {qcol(date_col)} >= %s
+                            """,
+                            [cutoff_7d],
+                        )
+                        count_7d = cur.fetchone()["n"]
+
+                        cur.execute(
+                            f"""
+                            SELECT COUNT(*) AS n
+                            FROM insider_buys
+                            WHERE {qcol(date_col)} >= %s
+                            """,
+                            [cutoff_30d],
+                        )
+                        count_30d = cur.fetchone()["n"]
+
+                latest_buy = latest_buy_row["latest_buy"]
+
+                status["insider_buys"].update(
+                    {
+                        "latest_buy": clean_value(latest_buy),
+                        "latest_buy_days_old": days_old(latest_buy),
+                        "count_24h": int(count_24h),
+                        "count_7d": int(count_7d),
+                        "count_30d": int(count_30d),
+                    }
+                )
+            else:
+                status["insider_buys"].update(
+                    {
+                        "latest_buy": None,
+                        "error": "No usable date column found.",
+                    }
+                )
+                status["warnings"].append("insider_buys has no usable date column.")
+
             if ticker_col and date_col:
-                insider_expr = qcol(insider_col) if insider_col else "'unknown_insider'"
-                value_expr = qcol(value_col) if value_col else "0"
+                cutoff_14d = datetime.now(timezone.utc) - timedelta(days=14)
+                insider_expr = qcol(insider_col) if insider_col else qcol(ticker_col)
 
                 with get_conn() as conn:
                     with conn.cursor() as cur:
@@ -393,8 +395,7 @@ def api_status():
                             FROM (
                                 SELECT
                                     {qcol(ticker_col)} AS ticker,
-                                    COUNT(DISTINCT {insider_expr}) AS insider_count,
-                                    SUM(COALESCE({value_expr}, 0)) AS total_value
+                                    COUNT(DISTINCT {insider_expr}) AS insider_count
                                 FROM insider_buys
                                 WHERE {qcol(date_col)} >= %s
                                 GROUP BY {qcol(ticker_col)}
@@ -414,15 +415,12 @@ def api_status():
                     "cluster_count_14d": None,
                     "error": "No ticker/date columns available for cluster count.",
                 }
-
         else:
-            status["insider_buys"] = {
-                "latest_buy": None,
-                "error": "No usable date column found.",
-            }
-            status["warnings"].append("insider_buys has no usable date column.")
-    else:
-        status["warnings"].append("insider_buys table missing.")
+            status["warnings"].append("insider_buys table missing.")
+    except Exception as e:
+        status["insider_buys"]["error"] = str(e)
+        status["clusters"]["error"] = str(e)
+        status["warnings"].append("Insider-buy status check failed.")
 
     if status["database_connected"] and not status["warnings"]:
         status["engine_status"] = "healthy"
@@ -595,9 +593,9 @@ def clusters(
             detail="No usable date column found in insider_buys",
         )
 
-    insider_expr = qcol(insider_col) if insider_col else "'unknown_insider'"
-    value_expr = qcol(value_col) if value_col else "0"
-    shares_expr = qcol(shares_col) if shares_col else "0"
+    insider_expr = qcol(insider_col) if insider_col else qcol(ticker_col)
+    value_expr = numeric_sum_expr(value_col)
+    shares_expr = numeric_sum_expr(shares_col)
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
@@ -606,8 +604,8 @@ def clusters(
             {qcol(ticker_col)} AS ticker,
             COUNT(*) AS buy_count,
             COUNT(DISTINCT {insider_expr}) AS insider_count,
-            SUM(COALESCE({value_expr}, 0)) AS total_value,
-            SUM(COALESCE({shares_expr}, 0)) AS total_shares,
+            {value_expr} AS total_value,
+            {shares_expr} AS total_shares,
             MIN({qcol(date_col)}) AS first_seen,
             MAX({qcol(date_col)}) AS last_seen
         FROM insider_buys
