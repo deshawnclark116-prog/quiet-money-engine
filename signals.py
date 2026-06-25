@@ -2,407 +2,444 @@
 """
 Quiet Money Engine — signal library.
 
-Each signal is a pure function: data dict -> float (higher = more bullish) or
-None when there is not enough data.
+Signals return numeric scores. Higher = better.
 
-The scoring engine z-scores each signal across the universe, so raw units do
-not need to match between signals.
+Current signal stack:
+- momentum_12_1
+- volume_pressure_score
+- insider_buy_score
+- capital_efficiency_score
+
+capital_efficiency_score is the small-account filter:
+- rewards cheap, liquid shares
+- does not blindly reward junk penny stocks
+- gives partial credit to larger names that are likely option-play candidates
 """
+
+import os
 import math
-from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 
-TRADING_DAYS_YEAR = 252
-TRADING_DAYS_MONTH = 21
-
-
-def _safe_float(value, default=0.0) -> float:
+def _clamp(value: float, low: float = -3.0, high: float = 3.0) -> float:
     try:
-        if value is None:
+        value = float(value)
+    except Exception:
+        return 0.0
+
+    return max(low, min(high, value))
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        if value is None or value == "":
             return default
         return float(value)
     except Exception:
         return default
 
 
-def _parse_datetime(value):
-    if value is None:
+def _bars(data: Dict[str, Any]) -> List[dict]:
+    bars = data.get("bars") or data.get("price_history") or data.get("history") or []
+
+    if not isinstance(bars, list):
+        return []
+
+    clean = []
+
+    for bar in bars:
+        if not isinstance(bar, dict):
+            continue
+
+        close = _safe_float(bar.get("close"), 0.0)
+        volume = _safe_float(bar.get("volume"), 0.0)
+
+        if close <= 0:
+            continue
+
+        clean.append(
+            {
+                "date": bar.get("date"),
+                "open": _safe_float(bar.get("open"), close),
+                "high": _safe_float(bar.get("high"), close),
+                "low": _safe_float(bar.get("low"), close),
+                "close": close,
+                "volume": volume,
+            }
+        )
+
+    return clean
+
+
+def _ticker(data: Dict[str, Any]) -> str:
+    return str(data.get("ticker") or data.get("symbol") or "").upper().strip()
+
+
+def _last_close(data: Dict[str, Any]) -> float:
+    bars = _bars(data)
+
+    if not bars:
+        return _safe_float(data.get("price") or data.get("last_price") or data.get("close"), 0.0)
+
+    return _safe_float(bars[-1].get("close"), 0.0)
+
+
+def _return_over_bars(bars: List[dict], lookback: int) -> Optional[float]:
+    if len(bars) <= lookback:
         return None
 
-    if isinstance(value, datetime):
-        if value.tzinfo is None:
-            return value.replace(tzinfo=timezone.utc)
-        return value
+    start = _safe_float(bars[-lookback - 1].get("close"), 0.0)
+    end = _safe_float(bars[-1].get("close"), 0.0)
 
-    if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
+    if start <= 0 or end <= 0:
+        return None
 
-        try:
-            if text.endswith("Z"):
-                text = text[:-1] + "+00:00"
-            return datetime.fromisoformat(text)
-        except Exception:
-            return None
-
-    return None
+    return (end / start) - 1.0
 
 
-def _mean(values: list[float]) -> float | None:
-    vals = [v for v in values if v is not None]
+def _avg_dollar_volume(bars: List[dict], window: int = 20) -> float:
+    if not bars:
+        return 0.0
+
+    sample = bars[-window:]
+
+    if not sample:
+        return 0.0
+
+    vals = []
+
+    for bar in sample:
+        close = _safe_float(bar.get("close"), 0.0)
+        volume = _safe_float(bar.get("volume"), 0.0)
+
+        if close > 0 and volume > 0:
+            vals.append(close * volume)
 
     if not vals:
-        return None
+        return 0.0
 
     return sum(vals) / len(vals)
 
 
-def momentum_12_1(data: dict) -> float | None:
+def _avg_volume(bars: List[dict], window: int = 20) -> float:
+    if not bars:
+        return 0.0
+
+    sample = bars[-window:]
+
+    vals = [
+        _safe_float(bar.get("volume"), 0.0)
+        for bar in sample
+        if _safe_float(bar.get("volume"), 0.0) > 0
+    ]
+
+    if not vals:
+        return 0.0
+
+    return sum(vals) / len(vals)
+
+
+def _split_csv_env(name: str, default: str) -> set:
+    raw = os.getenv(name, default)
+
+    return {
+        x.strip().upper()
+        for x in raw.split(",")
+        if x.strip()
+    }
+
+
+OPTIONABLE_PROXY_TICKERS = _split_csv_env(
+    "OPTIONABLE_PROXY_TICKERS",
     """
-    12-month price return skipping the most recent month.
+    AAPL,MSFT,NVDA,AMD,INTC,TSLA,META,AMZN,GOOGL,GOOG,
+    PLTR,SOFI,RIOT,MARA,HOOD,AFRM,UPST,OPEN,LCID,RIVN,
+    IONQ,SOUN,BBAI,ACHR,JOBY,ASTS,RKLB,ENVX,QS,PLUG,FCEL,
+    F,GM,BAC,C,CCL,NCLH,UAL,DAL,AAL,RBLX,COIN,SNAP,PINS
+    """,
+)
 
-    This is classic 12-1 momentum. Skipping the most recent month avoids some
-    short-term reversal noise.
+
+def momentum_12_1(data: Dict[str, Any]) -> float:
     """
-    bars = data.get("bars") or []
+    Classic 12-minus-1 style momentum.
 
-    if len(bars) < TRADING_DAYS_YEAR + 1:
-        return None
-
-    closes = [b["close"] for b in bars]
-
-    start = closes[-(TRADING_DAYS_YEAR + 1)]
-    end = closes[-(TRADING_DAYS_MONTH + 1)]
-
-    if start <= 0:
-        return None
-
-    return end / start - 1.0
-
-
-def volume_pressure_score(data: dict) -> float | None:
+    Uses roughly 12-month return excluding the most recent month when enough bars exist.
+    Falls back to shorter windows for newer/smaller names.
     """
-    Volume/accumulation pressure signal using close + volume.
+    bars = _bars(data)
+
+    if len(bars) < 45:
+        return 0.0
+
+    closes = [_safe_float(bar.get("close"), 0.0) for bar in bars]
+
+    if len(closes) >= 253:
+        start = closes[-253]
+        end = closes[-22]
+        recent = closes[-1]
+
+        if start <= 0 or end <= 0 or recent <= 0:
+            return 0.0
+
+        twelve_minus_one = (end / start) - 1.0
+        recent_month = (recent / end) - 1.0
+
+        score = (twelve_minus_one * 3.0) + (recent_month * 0.75)
+        return _clamp(score, -3.0, 3.0)
+
+    if len(closes) >= 126:
+        r = _return_over_bars(bars, 120)
+        if r is None:
+            return 0.0
+        return _clamp(r * 3.0, -3.0, 3.0)
+
+    if len(closes) >= 63:
+        r = _return_over_bars(bars, 60)
+        if r is None:
+            return 0.0
+        return _clamp(r * 2.5, -3.0, 3.0)
+
+    r = _return_over_bars(bars, 20)
+
+    if r is None:
+        return 0.0
+
+    return _clamp(r * 2.0, -3.0, 3.0)
+
+
+def volume_pressure_score(data: Dict[str, Any]) -> float:
+    """
+    Looks for demand/accumulation pressure.
 
     Rewards:
-    - recent volume expansion vs 20d/60d baseline
-    - recent dollar-volume expansion
-    - price up while volume expands
-    - short-term follow-through over 5d and 20d
-    - quiet accumulation, not just one random volume spike
+    - recent volume above baseline
+    - recent dollar volume expansion
+    - up-volume beating down-volume
+    - positive price follow-through
 
-    This v1 only uses date/close/volume because that is what data_layer.py
-    currently returns. Later v2 can use high/low/open/VWAP after we upgrade
-    data_layer.py to the full EOD endpoint.
+    Penalizes:
+    - huge volume with weak/negative follow-through
+    - thin or stale volume
     """
-    bars = data.get("bars") or []
+    bars = _bars(data)
 
-    if len(bars) < 80:
-        return None
+    if len(bars) < 30:
+        return 0.0
 
-    closes = [_safe_float(b.get("close")) for b in bars]
-    volumes = [_safe_float(b.get("volume")) for b in bars]
+    recent = bars[-10:]
+    base = bars[-60:-10] if len(bars) >= 70 else bars[:-10]
 
-    if not closes or not volumes:
-        return None
+    if not base:
+        return 0.0
 
-    if closes[-1] <= 0:
-        return None
+    recent_vol = _avg_volume(recent, len(recent))
+    base_vol = _avg_volume(base, len(base))
 
-    recent_5 = bars[-5:]
-    recent_10 = bars[-10:]
-    recent_20 = bars[-20:]
-    base_20 = bars[-40:-20]
-    base_60 = bars[-80:-20]
+    recent_dv = _avg_dollar_volume(recent, len(recent))
+    base_dv = _avg_dollar_volume(base, len(base))
 
-    recent_5_vol = _mean([_safe_float(b.get("volume")) for b in recent_5])
-    recent_10_vol = _mean([_safe_float(b.get("volume")) for b in recent_10])
-    recent_20_vol = _mean([_safe_float(b.get("volume")) for b in recent_20])
-    base_20_vol = _mean([_safe_float(b.get("volume")) for b in base_20])
-    base_60_vol = _mean([_safe_float(b.get("volume")) for b in base_60])
+    if base_vol <= 0 or base_dv <= 0:
+        return 0.0
 
-    if not recent_5_vol or not recent_10_vol or not recent_20_vol:
-        return None
-
-    if not base_20_vol or not base_60_vol:
-        return None
-
-    if base_20_vol <= 0 or base_60_vol <= 0:
-        return None
-
-    recent_5_dollar_vol = _mean(
-        [
-            _safe_float(b.get("close")) * _safe_float(b.get("volume"))
-            for b in recent_5
-        ]
-    )
-
-    base_20_dollar_vol = _mean(
-        [
-            _safe_float(b.get("close")) * _safe_float(b.get("volume"))
-            for b in base_20
-        ]
-    )
-
-    if not recent_5_dollar_vol or not base_20_dollar_vol or base_20_dollar_vol <= 0:
-        dollar_volume_ratio = 1.0
-    else:
-        dollar_volume_ratio = recent_5_dollar_vol / base_20_dollar_vol
-
-    vol_ratio_5_vs_20 = recent_5_vol / base_20_vol
-    vol_ratio_10_vs_60 = recent_10_vol / base_60_vol
-    vol_ratio_20_vs_60 = recent_20_vol / base_60_vol
-
-    close_now = closes[-1]
-    close_5 = closes[-6] if len(closes) >= 6 else closes[0]
-    close_20 = closes[-21] if len(closes) >= 21 else closes[0]
-    close_60 = closes[-61] if len(closes) >= 61 else closes[0]
-
-    ret_5 = (close_now / close_5) - 1.0 if close_5 > 0 else 0.0
-    ret_20 = (close_now / close_20) - 1.0 if close_20 > 0 else 0.0
-    ret_60 = (close_now / close_60) - 1.0 if close_60 > 0 else 0.0
+    vol_ratio = recent_vol / base_vol
+    dollar_vol_ratio = recent_dv / base_dv
 
     up_volume = 0.0
     down_volume = 0.0
 
-    for i in range(max(1, len(bars) - 20), len(bars)):
-        today_close = closes[i]
-        yesterday_close = closes[i - 1]
-        today_volume = volumes[i]
+    for i in range(1, len(recent)):
+        today = recent[i]
+        yesterday = recent[i - 1]
 
-        if today_close >= yesterday_close:
-            up_volume += today_volume
+        vol = _safe_float(today.get("volume"), 0.0)
+        close_today = _safe_float(today.get("close"), 0.0)
+        close_yesterday = _safe_float(yesterday.get("close"), 0.0)
+
+        if close_today >= close_yesterday:
+            up_volume += vol
         else:
-            down_volume += today_volume
+            down_volume += vol
 
     up_down_ratio = up_volume / max(down_volume, 1.0)
 
-    positive_volume_days = 0
+    r_5 = _return_over_bars(bars, 5) or 0.0
+    r_20 = _return_over_bars(bars, 20) or 0.0
+    r_60 = _return_over_bars(bars, 60) or 0.0
 
-    for i in range(max(1, len(bars) - 10), len(bars)):
-        if closes[i] > closes[i - 1] and volumes[i] > base_20_vol:
-            positive_volume_days += 1
+    score = 0.0
 
-    # Components are capped so one wild spike does not dominate.
-    volume_expansion = min(math.log(max(vol_ratio_5_vs_20, 0.01), 2), 3.0)
-    medium_volume_expansion = min(math.log(max(vol_ratio_10_vs_60, 0.01), 2), 3.0)
-    sustained_volume = min(math.log(max(vol_ratio_20_vs_60, 0.01), 2), 2.0)
-    dollar_volume_expansion = min(math.log(max(dollar_volume_ratio, 0.01), 2), 3.0)
-    up_down_component = min(math.log(max(up_down_ratio, 0.01), 2), 2.0)
+    score += math.log(max(vol_ratio, 0.01)) * 0.65
+    score += math.log(max(dollar_vol_ratio, 0.01)) * 0.55
+    score += math.log(max(up_down_ratio, 0.01)) * 0.25
+    score += r_20 * 1.25
+    score += r_5 * 0.50
 
-    price_confirm_5 = max(min(ret_5 * 10.0, 2.0), -2.0)
-    price_confirm_20 = max(min(ret_20 * 5.0, 2.0), -2.0)
+    if r_60 > 0:
+        score += 0.25
 
-    trend_guard = 0.0
-    if ret_60 > 0:
-        trend_guard += min(ret_60 * 2.0, 1.0)
-    else:
-        trend_guard += max(ret_60 * 2.0, -1.0)
+    if vol_ratio > 2.5 and r_5 < 0:
+        score -= 0.75
 
-    accumulation_days_component = min(positive_volume_days * 0.25, 2.0)
+    if recent_dv < 250_000:
+        score -= 0.75
 
-    # Penalize blow-off style action: huge 5d volume but negative 5d return.
-    blowoff_penalty = 0.0
-    if vol_ratio_5_vs_20 > 2.5 and ret_5 < 0:
-        blowoff_penalty = 1.5
-
-    score = (
-        volume_expansion
-        + medium_volume_expansion
-        + sustained_volume
-        + dollar_volume_expansion
-        + up_down_component
-        + price_confirm_5
-        + price_confirm_20
-        + trend_guard
-        + accumulation_days_component
-        - blowoff_penalty
-    )
-
-    return round(score, 6)
+    return _clamp(score, -3.0, 3.0)
 
 
-def _role_weight(role_text: str | None) -> float:
-    role = (role_text or "").lower()
+def _extract_insider_count(data: Dict[str, Any]) -> int:
+    ticker = _ticker(data)
 
-    if any(x in role for x in ["chief executive", "ceo", "president"]):
-        return 1.75
+    possible_keys = [
+        "recent_insider_buy_count",
+        "insider_buy_count",
+        "insider_count",
+        "form4_buy_count",
+        "recent_form4_buy_count",
+    ]
 
-    if any(x in role for x in ["chief financial", "cfo"]):
-        return 1.55
+    for key in possible_keys:
+        if key in data:
+            try:
+                return int(data.get(key) or 0)
+            except Exception:
+                pass
 
-    if any(x in role for x in ["chief operating", "coo"]):
-        return 1.45
+    recent_map = data.get("recent_insider_buys") or data.get("insider_buy_counts")
 
-    if any(x in role for x in ["chairman", "chair"]):
-        return 1.40
+    if isinstance(recent_map, dict) and ticker:
+        try:
+            return int(recent_map.get(ticker) or 0)
+        except Exception:
+            return 0
 
-    if any(x in role for x in ["officer", "evp", "svp", "vp", "chief"]):
-        return 1.30
+    buys = data.get("insider_buys")
 
-    if "director" in role:
-        return 1.20
+    if isinstance(buys, list):
+        return len(buys)
 
-    if "10%" in role or "ten percent" in role or "beneficial owner" in role:
-        return 1.10
-
-    return 1.00
+    return 0
 
 
-def insider_buy_score(data: dict) -> float:
+def insider_buy_score(data: Dict[str, Any]) -> float:
     """
-    Bullish insider-buy signal from existing Form 4 buy table.
+    Lightweight insider-buy confirmation score.
 
-    Assumes the worker already filtered to real transaction-code P buys.
-    No recent insider buys = 0.0.
-
-    Rewards:
-    - more recent buys
-    - more distinct insiders
-    - officer/director role quality
-    - larger dollar value
-    - buy size relative to market cap
-    - buy size relative to average dollar volume
+    This stays conservative so one insider buy does not dominate the engine.
     """
-    buys = data.get("insider_buys") or []
+    count = _extract_insider_count(data)
 
-    if not buys:
+    if count <= 0:
         return 0.0
 
-    now = datetime.now(timezone.utc)
+    score = 0.45
 
-    total_value = 0.0
-    total_role_weighted_value = 0.0
-    best_market_cap = 0.0
-    best_avg_dollar_vol = 0.0
+    if count >= 2:
+        score += 0.35
 
-    insiders = set()
-    recent_7d_count = 0
-    recent_14d_count = 0
-    recent_30d_count = 0
+    if count >= 3:
+        score += 0.25
 
-    recency_value_score = 0.0
-    role_score_sum = 0.0
+    avg_dv = _avg_dollar_volume(_bars(data), 20)
 
-    for buy in buys:
-        insider = str(buy.get("insider") or "").strip().lower()
+    if avg_dv >= 1_000_000:
+        score += 0.10
 
-        if insider:
-            insiders.add(insider)
+    return _clamp(score, 0.0, 1.5)
 
-        role = buy.get("role")
-        role_w = _role_weight(role)
-        role_score_sum += role_w
 
-        value = _safe_float(buy.get("value"))
+def capital_efficiency_score(data: Dict[str, Any]) -> float:
+    """
+    Small-account opportunity score.
 
-        if value <= 0:
-            shares = _safe_float(buy.get("shares"))
-            price = _safe_float(buy.get("price"))
-            value = shares * price
+    Rewards:
+    - cheap stocks that are still liquid enough to trade
+    - $1-$5 sweet spot
+    - $5-$10 secondary zone
+    - some larger optionable-proxy names, so the engine does not ignore
+      expensive stocks that may be playable through options later
 
-        market_cap = _safe_float(buy.get("market_cap"))
-        avg_dollar_vol = _safe_float(buy.get("avg_dollar_vol"))
+    Penalizes:
+    - ultra-cheap dead liquidity
+    - under $0.25 names
+    - expensive names with no optionability proxy
+    """
+    ticker = _ticker(data)
+    bars = _bars(data)
+    price = _last_close(data)
+    avg_dv_20 = _avg_dollar_volume(bars, 20)
 
-        if market_cap > 0:
-            best_market_cap = max(best_market_cap, market_cap)
+    if price <= 0:
+        return 0.0
 
-        if avg_dollar_vol > 0:
-            best_avg_dollar_vol = max(best_avg_dollar_vol, avg_dollar_vol)
+    score = 0.0
 
-        seen_at = _parse_datetime(buy.get("seen_at")) or _parse_datetime(buy.get("filed_at"))
+    # Share affordability lane.
+    if price < 0.25:
+        score -= 1.50
 
-        age_days = 60.0
+    elif price < 1.00:
+        score += 0.45
 
-        if seen_at:
-            age_days = max(0.0, (now - seen_at).total_seconds() / 86400.0)
-
-        if age_days <= 7:
-            recent_7d_count += 1
-
-        if age_days <= 14:
-            recent_14d_count += 1
-
-        if age_days <= 30:
-            recent_30d_count += 1
-
-        recency_w = max(0.05, 1.0 - min(age_days, 60.0) / 60.0)
-
-        total_value += max(value, 0.0)
-        total_role_weighted_value += max(value, 0.0) * role_w
-
-        if value > 0:
-            dollar_component = math.log10(1.0 + value) / 6.0
+        # Under-$1 stocks need stronger liquidity to be useful.
+        if avg_dv_20 >= 2_000_000:
+            score += 0.65
+        elif avg_dv_20 >= 1_000_000:
+            score += 0.40
+        elif avg_dv_20 >= 500_000:
+            score += 0.10
         else:
-            dollar_component = 0.05
+            score -= 0.85
 
-        recency_value_score += dollar_component * role_w * recency_w
+    elif price <= 5.00:
+        score += 1.35
 
-    buy_count = len(buys)
-    insider_count = len(insiders)
+        if avg_dv_20 >= 2_000_000:
+            score += 0.35
+        elif avg_dv_20 >= 500_000:
+            score += 0.15
+        else:
+            score -= 0.40
 
-    cluster_bonus = 0.0
+    elif price <= 10.00:
+        score += 0.95
 
-    if insider_count >= 2:
-        cluster_bonus += 1.00
+        if avg_dv_20 >= 1_000_000:
+            score += 0.25
+        elif avg_dv_20 < 300_000:
+            score -= 0.35
 
-    if insider_count >= 3:
-        cluster_bonus += 0.75
+    elif price <= 25.00:
+        score += 0.25
 
-    if insider_count >= 5:
-        cluster_bonus += 0.75
+        if ticker in OPTIONABLE_PROXY_TICKERS:
+            score += 0.45
 
-    recent_bonus = (
-        min(recent_7d_count, 5) * 0.35
-        + min(recent_14d_count, 5) * 0.20
-        + min(recent_30d_count, 8) * 0.10
-    )
+    else:
+        # Do not punish strong expensive names too much if they are likely optionable.
+        if ticker in OPTIONABLE_PROXY_TICKERS:
+            score += 0.55
+        else:
+            score -= 0.25
 
-    count_score = min(buy_count, 10) * 0.12
-    insider_count_score = min(insider_count, 8) * 0.35
+    # General liquidity quality.
+    if avg_dv_20 >= 20_000_000:
+        score += 0.25
+    elif avg_dv_20 >= 5_000_000:
+        score += 0.15
+    elif avg_dv_20 < 250_000:
+        score -= 0.75
 
-    avg_role_score = role_score_sum / buy_count if buy_count else 1.0
-    role_quality_bonus = max(0.0, avg_role_score - 1.0) * 1.25
+    # Avoid thin micro-trash being rewarded just for low price.
+    if price < 1.00 and avg_dv_20 < 500_000:
+        score -= 0.50
 
-    market_cap_component = 0.0
-
-    if total_value > 0 and best_market_cap > 0:
-        market_cap_component = min((total_value / best_market_cap) * 10000.0, 3.0)
-
-    liquidity_component = 0.0
-
-    if total_value > 0 and best_avg_dollar_vol > 0:
-        liquidity_component = min(total_value / best_avg_dollar_vol, 3.0)
-
-    total_value_component = 0.0
-
-    if total_value > 0:
-        total_value_component = min(math.log10(1.0 + total_value) / 3.0, 3.0)
-
-    role_weighted_value_component = 0.0
-
-    if total_role_weighted_value > 0:
-        role_weighted_value_component = min(math.log10(1.0 + total_role_weighted_value) / 4.0, 3.0)
-
-    score = (
-        recency_value_score
-        + cluster_bonus
-        + recent_bonus
-        + count_score
-        + insider_count_score
-        + role_quality_bonus
-        + market_cap_component
-        + liquidity_component
-        + total_value_component
-        + role_weighted_value_component
-    )
-
-    return round(score, 6)
+    return _clamp(score, -2.0, 2.5)
 
 
 SIGNALS = {
     "momentum_12_1": momentum_12_1,
     "insider_buy_score": insider_buy_score,
     "volume_pressure_score": volume_pressure_score,
-}
+    "capital_efficiency_score": capital_efficiency_score,
+    }
