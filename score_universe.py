@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
 """
 Quiet Money Engine — daily cross-sectional scorer.
-
-Builds a daily universe, fetches price history, attaches recent insider-buy
-data, computes every signal, z-scores and ranks them into a watchlist, then
-saves the ranking to Postgres.
-
-Universe behavior:
-- If UNIVERSE env var is set, use it exactly.
-- If UNIVERSE env var is blank/missing, use universe_builder.py.
 """
 import os
 import logging
@@ -31,8 +23,11 @@ log = logging.getLogger("scorer")
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
 MANUAL_UNIVERSE = os.getenv("UNIVERSE", "").strip()
-
 MAX_UNIVERSE_SIZE = int(os.getenv("MAX_UNIVERSE_SIZE", "25"))
+MIN_RANKED_TO_SAVE = int(os.getenv("MIN_RANKED_TO_SAVE", "5"))
+
+MIN_PRICE = float(os.getenv("MIN_PRICE", "0.10"))
+MIN_DOLLAR_VOLUME = float(os.getenv("MIN_DOLLAR_VOLUME", "250000"))
 
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "60"))
 
@@ -53,23 +48,17 @@ def get_universe() -> list[str]:
         ]
 
         log.info("Using manual UNIVERSE env var with %s tickers", len(tickers))
-        return tickers[:MAX_UNIVERSE_SIZE]
+        return tickers
 
     tickers = build_dynamic_universe(max_size=MAX_UNIVERSE_SIZE)
 
-    log.info("Using dynamic universe with %s tickers", len(tickers))
-    log.info("Universe: %s", ",".join(tickers))
+    log.info("Using dynamic universe with %s candidates", len(tickers))
+    log.info("Universe candidates: %s", ",".join(tickers))
 
     return tickers
 
 
 def parse_signal_weights() -> dict:
-    """
-    Optional env override:
-        SIGNAL_WEIGHTS=momentum_12_1:1.0,insider_buy_score:0.35,volume_pressure_score:0.50
-
-    If unset, use conservative defaults.
-    """
     raw = os.getenv("SIGNAL_WEIGHTS", "").strip()
 
     if not raw:
@@ -92,19 +81,10 @@ def parse_signal_weights() -> dict:
         except Exception:
             log.warning("Bad SIGNAL_WEIGHTS entry ignored: %s", part)
 
-    if not weights:
-        return DEFAULT_SIGNAL_WEIGHTS
-
-    return weights
+    return weights or DEFAULT_SIGNAL_WEIGHTS
 
 
 def load_recent_insider_buys(tickers: list[str], days: int = 60) -> dict[str, list[dict]]:
-    """
-    Load recent insider buys for the current universe.
-
-    Uses seen_at because it is a real TIMESTAMPTZ column. filed_at is currently
-    stored as text in the DB, so seen_at is safer for the daily scoring feature.
-    """
     result = {ticker: [] for ticker in tickers}
 
     if not DATABASE_URL:
@@ -157,6 +137,46 @@ def load_recent_insider_buys(tickers: list[str], days: int = 60) -> dict[str, li
     return result
 
 
+def avg_dollar_volume(bars: list[dict], n: int = 20) -> float:
+    recent = bars[-n:]
+
+    if not recent:
+        return 0.0
+
+    values = []
+
+    for b in recent:
+        close = float(b.get("close") or 0)
+        volume = float(b.get("volume") or 0)
+
+        if close > 0 and volume > 0:
+            values.append(close * volume)
+
+    if not values:
+        return 0.0
+
+    return sum(values) / len(values)
+
+
+def passes_tradeability_price_gate(ticker: str, bars: list[dict]) -> bool:
+    if not bars:
+        return False
+
+    last_close = float(bars[-1].get("close") or 0)
+
+    if last_close < MIN_PRICE:
+        log.info("%s failed price gate: %.4f < %.4f", ticker, last_close, MIN_PRICE)
+        return False
+
+    adv = avg_dollar_volume(bars, 20)
+
+    if adv < MIN_DOLLAR_VOLUME:
+        log.info("%s failed dollar-volume gate: %.0f < %.0f", ticker, adv, MIN_DOLLAR_VOLUME)
+        return False
+
+    return True
+
+
 def build_universe_data(tickers: list[str]) -> dict:
     insider_buys_by_ticker = load_recent_insider_buys(
         tickers,
@@ -168,13 +188,17 @@ def build_universe_data(tickers: list[str]) -> dict:
     for ticker in tickers:
         bars = get_price_history(ticker, days=400)
 
-        if bars:
-            data[ticker] = {
-                "bars": bars,
-                "insider_buys": insider_buys_by_ticker.get(ticker, []),
-            }
-        else:
+        if not bars:
             log.warning("No price history for %s; skipping", ticker)
+            continue
+
+        if not passes_tradeability_price_gate(ticker, bars):
+            continue
+
+        data[ticker] = {
+            "bars": bars,
+            "insider_buys": insider_buys_by_ticker.get(ticker, []),
+        }
 
     return data
 
@@ -186,7 +210,7 @@ def main() -> None:
     weights = parse_signal_weights()
 
     log.info(
-        "Scoring %d tickers on signals: %s",
+        "Scoring up to %d candidates on signals: %s",
         len(universe),
         ", ".join(SIGNALS),
     )
@@ -196,14 +220,17 @@ def main() -> None:
     data = build_universe_data(universe)
 
     if not data:
-        log.error("No data fetched — check FMP_API_KEY")
-        return
+        log.error("No usable data fetched — refusing to save empty watchlist")
+        raise SystemExit(1)
 
     ranked = score_universe(data, SIGNALS, weights=weights)
 
     rows = []
 
     for i, row in enumerate(ranked, 1):
+        if i > MAX_UNIVERSE_SIZE:
+            break
+
         row["rank"] = i
         rows.append(row)
 
@@ -222,6 +249,14 @@ def main() -> None:
             raw_insider_count,
             sig_str,
         )
+
+    if len(rows) < MIN_RANKED_TO_SAVE:
+        log.error(
+            "Only %d ranked rows. Minimum required is %d. Refusing to overwrite DB.",
+            len(rows),
+            MIN_RANKED_TO_SAVE,
+        )
+        raise SystemExit(1)
 
     save_watchlist(date.today(), rows)
 
