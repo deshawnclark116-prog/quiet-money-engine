@@ -117,7 +117,28 @@ def main():
 
                 logging.info("Latest watchlist run_date: %s", run_date)
 
-                signal_names = [signals_col] if signals_col else ["momentum_12_1"]
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM watchlist_scores
+                    WHERE {qcol(run_date_col)} = %s
+                    ORDER BY {qcol(composite_col)} DESC
+                    """,
+                    [latest_run],
+                )
+                watchlist_rows = cur.fetchall()
+
+                if not watchlist_rows:
+                    raise RuntimeError("No rows found for latest watchlist run")
+
+                signal_name_set = set()
+
+                for row in watchlist_rows:
+                    signals = normalize_signals(row.get(signals_col)) if signals_col else {}
+                    for name in signals:
+                        signal_name_set.add(name)
+
+                signal_names = sorted(signal_name_set) if signal_name_set else ["unknown"]
 
                 cur.execute(
                     """
@@ -138,7 +159,7 @@ def main():
                     [
                         run_date,
                         MODEL_VERSION,
-                        os.getenv("UNIVERSE", "default"),
+                        os.getenv("UNIVERSE", "dynamic"),
                         Json(signal_names),
                         "Snapshot copied from latest watchlist_scores run.",
                     ],
@@ -147,42 +168,19 @@ def main():
                 run_id = cur.fetchone()["id"]
                 logging.info("prediction_runs id: %s", run_id)
 
-                select_fields = [
-                    f"{qcol(ticker_col)} AS ticker",
-                    f"{qcol(composite_col)} AS composite",
-                ]
-
-                if signals_col:
-                    select_fields.append(f"{qcol(signals_col)} AS signals")
-                else:
-                    select_fields.append("NULL AS signals")
-
-                if price_col:
-                    select_fields.append(f"{qcol(price_col)} AS price_at_signal")
-                else:
-                    select_fields.append("NULL AS price_at_signal")
-
-                sql = f"""
-                    SELECT
-                        {", ".join(select_fields)}
-                    FROM watchlist_scores
-                    WHERE {qcol(run_date_col)} = %s
-                    ORDER BY {qcol(composite_col)} DESC
-                """
-
-                cur.execute(sql, [latest_run])
-                rows = cur.fetchall()
-
-                if not rows:
-                    raise RuntimeError("No rows found for latest watchlist run")
+                # Replace current run snapshots exactly, so stale same-day tickers disappear.
+                cur.execute(
+                    "DELETE FROM prediction_snapshots WHERE run_id = %s",
+                    [run_id],
+                )
 
                 inserted = 0
 
-                for idx, row in enumerate(rows, start=1):
-                    ticker = row["ticker"]
-                    composite = row["composite"]
-                    signals = normalize_signals(row.get("signals"))
-                    price_at_signal = row.get("price_at_signal")
+                for idx, row in enumerate(watchlist_rows, start=1):
+                    ticker = row[ticker_col]
+                    composite = row[composite_col]
+                    signals = normalize_signals(row.get(signals_col)) if signals_col else {}
+                    price_at_signal = row.get(price_col) if price_col else None
 
                     cur.execute(
                         """
@@ -197,12 +195,6 @@ def main():
                             source
                         )
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (run_id, ticker)
-                        DO UPDATE SET
-                            rank = EXCLUDED.rank,
-                            composite = EXCLUDED.composite,
-                            signals = EXCLUDED.signals,
-                            price_at_signal = EXCLUDED.price_at_signal
                         """,
                         [
                             run_id,
