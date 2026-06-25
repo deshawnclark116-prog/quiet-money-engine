@@ -2,13 +2,13 @@
 """
 Quiet Money Engine — daily cross-sectional scorer.
 
-Fetches price history for the universe, attaches recent insider-buy data,
-computes every signal, z-scores and ranks them into a watchlist, then saves
-the ranking to Postgres.
+Builds a daily universe, fetches price history, attaches recent insider-buy
+data, computes every signal, z-scores and ranks them into a watchlist, then
+saves the ranking to Postgres.
 
-Important:
-New signals can be run at conservative weights until the grader proves they
-add value. This prevents one fresh unvalidated signal from hijacking the ranker.
+Universe behavior:
+- If UNIVERSE env var is set, use it exactly.
+- If UNIVERSE env var is blank/missing, use universe_builder.py.
 """
 import os
 import logging
@@ -21,6 +21,7 @@ from data_layer import get_price_history
 from signals import SIGNALS
 from scoring import score_universe
 from db import init_db, save_watchlist
+from universe_builder import build_dynamic_universe
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -29,14 +30,9 @@ log = logging.getLogger("scorer")
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
-UNIVERSE = [
-    t.strip().upper()
-    for t in os.getenv(
-        "UNIVERSE",
-        "AAPL,MSFT,NVDA,AMD,INTC,F,GM,RIOT,SOFI,PLTR",
-    ).split(",")
-    if t.strip()
-]
+MANUAL_UNIVERSE = os.getenv("UNIVERSE", "").strip()
+
+MAX_UNIVERSE_SIZE = int(os.getenv("MAX_UNIVERSE_SIZE", "25"))
 
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "60"))
 
@@ -46,6 +42,25 @@ DEFAULT_SIGNAL_WEIGHTS = {
     "insider_buy_score": 0.35,
     "volume_pressure_score": 0.50,
 }
+
+
+def get_universe() -> list[str]:
+    if MANUAL_UNIVERSE:
+        tickers = [
+            t.strip().upper()
+            for t in MANUAL_UNIVERSE.split(",")
+            if t.strip()
+        ]
+
+        log.info("Using manual UNIVERSE env var with %s tickers", len(tickers))
+        return tickers[:MAX_UNIVERSE_SIZE]
+
+    tickers = build_dynamic_universe(max_size=MAX_UNIVERSE_SIZE)
+
+    log.info("Using dynamic universe with %s tickers", len(tickers))
+    log.info("Universe: %s", ",".join(tickers))
+
+    return tickers
 
 
 def parse_signal_weights() -> dict:
@@ -167,17 +182,18 @@ def build_universe_data(tickers: list[str]) -> dict:
 def main() -> None:
     init_db()
 
+    universe = get_universe()
     weights = parse_signal_weights()
 
     log.info(
         "Scoring %d tickers on signals: %s",
-        len(UNIVERSE),
+        len(universe),
         ", ".join(SIGNALS),
     )
 
     log.info("Signal weights: %s", weights)
 
-    data = build_universe_data(UNIVERSE)
+    data = build_universe_data(universe)
 
     if not data:
         log.error("No data fetched — check FMP_API_KEY")
@@ -199,7 +215,7 @@ def main() -> None:
         raw_insider_count = len(data.get(row["ticker"], {}).get("insider_buys", []))
 
         log.info(
-            "%2d. %-6s composite %+.2f | insider_buys=%d | %s",
+            "%2d. %-8s composite %+.2f | insider_buys=%d | %s",
             i,
             row["ticker"],
             row["composite"],
