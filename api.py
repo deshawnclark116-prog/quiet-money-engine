@@ -195,3 +195,24 @@ def watchlist_runs(
         "count": len(rows),
         "items": clean_rows(rows),
     }
+    @app.get("/api/debug/schema")
+def debug_schema():
+    sql = """
+        SELECT
+            table_name,
+            column_name,
+            data_type
+        FROM information_schema.columns
+        WHERE table_name IN ('insider_buys', 'watchlist_scores')
+        ORDER BY table_name, ordinal_position
+    """
+
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql)
+            rows = cur.fetchall()
+
+    return {
+        "count": len(rows),
+        "items": clean_rows(rows),
+    }
