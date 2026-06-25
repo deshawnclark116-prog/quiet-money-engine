@@ -5,6 +5,10 @@ Quiet Money Engine — daily cross-sectional scorer.
 Fetches price history for the universe, attaches recent insider-buy data,
 computes every signal, z-scores and ranks them into a watchlist, then saves
 the ranking to Postgres.
+
+Important:
+New signals can be run at conservative weights until the grader proves they
+add value. This prevents one fresh unvalidated signal from hijacking the ranker.
 """
 import os
 import logging
@@ -35,6 +39,47 @@ UNIVERSE = [
 ]
 
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "60"))
+
+
+DEFAULT_SIGNAL_WEIGHTS = {
+    "momentum_12_1": 1.0,
+    "insider_buy_score": 0.35,
+}
+
+
+def parse_signal_weights() -> dict:
+    """
+    Optional env override:
+        SIGNAL_WEIGHTS=momentum_12_1:1.0,insider_buy_score:0.35
+
+    If unset, use conservative defaults.
+    """
+    raw = os.getenv("SIGNAL_WEIGHTS", "").strip()
+
+    if not raw:
+        return DEFAULT_SIGNAL_WEIGHTS
+
+    weights = {}
+
+    for part in raw.split(","):
+        part = part.strip()
+
+        if not part or ":" not in part:
+            continue
+
+        name, value = part.split(":", 1)
+        name = name.strip()
+        value = value.strip()
+
+        try:
+            weights[name] = float(value)
+        except Exception:
+            log.warning("Bad SIGNAL_WEIGHTS entry ignored: %s", part)
+
+    if not weights:
+        return DEFAULT_SIGNAL_WEIGHTS
+
+    return weights
 
 
 def load_recent_insider_buys(tickers: list[str], days: int = 60) -> dict[str, list[dict]]:
@@ -83,6 +128,7 @@ def load_recent_insider_buys(tickers: list[str], days: int = 60) -> dict[str, li
                 result[ticker].append(dict(row))
 
         active = {t: len(v) for t, v in result.items() if v}
+
         if active:
             log.info("Loaded recent insider buys: %s", active)
         else:
@@ -119,11 +165,15 @@ def build_universe_data(tickers: list[str]) -> dict:
 def main() -> None:
     init_db()
 
+    weights = parse_signal_weights()
+
     log.info(
         "Scoring %d tickers on signals: %s",
         len(UNIVERSE),
         ", ".join(SIGNALS),
     )
+
+    log.info("Signal weights: %s", weights)
 
     data = build_universe_data(UNIVERSE)
 
@@ -131,7 +181,7 @@ def main() -> None:
         log.error("No data fetched — check FMP_API_KEY")
         return
 
-    ranked = score_universe(data, SIGNALS)
+    ranked = score_universe(data, SIGNALS, weights=weights)
 
     rows = []
 
