@@ -1,11 +1,24 @@
+#!/usr/bin/env python3
+"""
+Quiet Money Engine — prediction grader.
+
+Grades saved prediction snapshots at 1d / 5d / 20d horizons.
+
+Uses data_layer.get_price_history(), so grading follows the same provider chain
+as the scorer.
+
+Recommended:
+PRICE_PROVIDER_ORDER=stooq,yahoo
+"""
 import os
 import logging
 from datetime import date, datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
-import requests
 import psycopg2
 from psycopg2.extras import RealDictCursor
+
+from data_layer import get_price_history
 
 
 logging.basicConfig(
@@ -14,7 +27,6 @@ logging.basicConfig(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-FMP_API_KEY = os.getenv("FMP_API_KEY")
 
 HORIZONS = [
     int(x.strip())
@@ -24,14 +36,8 @@ HORIZONS = [
 
 MAX_SNAPSHOTS = int(os.getenv("GRADE_MAX_SNAPSHOTS", "200"))
 
-FMP_URL = "https://financialmodelingprep.com/stable/historical-price-eod/dividend-adjusted"
-
-
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is required")
-
-if not FMP_API_KEY:
-    raise RuntimeError("FMP_API_KEY env var is required")
 
 
 _price_cache: Dict[str, List[dict]] = {}
@@ -57,109 +63,46 @@ def as_float(value) -> Optional[float]:
         return None
 
 
-def pick_number(row: dict, keys: List[str]) -> Optional[float]:
-    for key in keys:
-        if key in row:
-            value = as_float(row.get(key))
-            if value is not None:
-                return value
-    return None
-
-
-def normalize_bars(raw) -> List[dict]:
-    if isinstance(raw, dict):
-        if isinstance(raw.get("historical"), list):
-            raw = raw["historical"]
-        elif isinstance(raw.get("data"), list):
-            raw = raw["data"]
-        else:
-            return []
-
-    if not isinstance(raw, list):
-        return []
-
-    bars = []
-
-    for row in raw:
-        if not isinstance(row, dict):
-            continue
-
-        if not row.get("date"):
-            continue
-
-        close = pick_number(
-            row,
-            [
-                "adjClose",
-                "adjustedClose",
-                "dividendAdjustedClose",
-                "close",
-                "price",
-            ],
-        )
-
-        if close is None or close <= 0:
-            continue
-
-        high = pick_number(
-            row,
-            [
-                "adjHigh",
-                "adjustedHigh",
-                "dividendAdjustedHigh",
-                "high",
-            ],
-        )
-
-        if high is None or high <= 0:
-            high = close
-
-        try:
-            bar_date = parse_date(row["date"])
-        except Exception:
-            continue
-
-        bars.append(
-            {
-                "date": bar_date,
-                "close": close,
-                "high": high,
-            }
-        )
-
-    bars.sort(key=lambda x: x["date"])
-    return bars
-
-
 def fetch_bars(symbol: str) -> List[dict]:
     symbol = symbol.upper().strip()
 
     if symbol in _price_cache:
         return _price_cache[symbol]
 
-    params = {
-        "symbol": symbol,
-        "apikey": FMP_API_KEY,
-    }
-
     logging.info("Fetching price history for %s", symbol)
 
-    try:
-        resp = requests.get(FMP_URL, params=params, timeout=30)
-        resp.raise_for_status()
-        raw = resp.json()
-    except Exception as e:
-        logging.warning("Price fetch failed for %s: %s", symbol, e)
-        _price_cache[symbol] = []
-        return []
-
-    bars = normalize_bars(raw)
+    bars = get_price_history(symbol, days=1400)
 
     if not bars:
         logging.warning("No usable bars for %s", symbol)
+        _price_cache[symbol] = []
+        return []
 
-    _price_cache[symbol] = bars
-    return bars
+    clean = []
+
+    for bar in bars:
+        try:
+            d = parse_date(bar.get("date"))
+            close = as_float(bar.get("close"))
+            high = as_float(bar.get("high")) or close
+
+            if close is None or close <= 0:
+                continue
+
+            clean.append(
+                {
+                    "date": d,
+                    "close": close,
+                    "high": high if high and high > 0 else close,
+                }
+            )
+        except Exception:
+            continue
+
+    clean.sort(key=lambda x: x["date"])
+
+    _price_cache[symbol] = clean
+    return clean
 
 
 def find_bar_index_on_or_before(bars: List[dict], target_date: date) -> Optional[int]:
@@ -172,14 +115,6 @@ def find_bar_index_on_or_before(bars: List[dict], target_date: date) -> Optional
             break
 
     return idx
-
-
-def find_bar_index_on_or_after(bars: List[dict], target_date: date) -> Optional[int]:
-    for i, bar in enumerate(bars):
-        if bar["date"] >= target_date:
-            return i
-
-    return None
 
 
 def grade_snapshot(snapshot: dict, horizon_days: int) -> Optional[dict]:
