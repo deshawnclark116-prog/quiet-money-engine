@@ -44,13 +44,14 @@ INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "60"))
 DEFAULT_SIGNAL_WEIGHTS = {
     "momentum_12_1": 1.0,
     "insider_buy_score": 0.35,
+    "volume_pressure_score": 0.50,
 }
 
 
 def parse_signal_weights() -> dict:
     """
     Optional env override:
-        SIGNAL_WEIGHTS=momentum_12_1:1.0,insider_buy_score:0.35
+        SIGNAL_WEIGHTS=momentum_12_1:1.0,insider_buy_score:0.35,volume_pressure_score:0.50
 
     If unset, use conservative defaults.
     """
@@ -124,6 +125,7 @@ def load_recent_insider_buys(tickers: list[str], days: int = 60) -> dict[str, li
 
         for row in rows:
             ticker = str(row["ticker"]).upper()
+
             if ticker in result:
                 result[ticker].append(dict(row))
 
