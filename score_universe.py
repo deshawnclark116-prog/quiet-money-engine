@@ -3,24 +3,33 @@
 Quiet Money Engine — universe scorer.
 
 Builds a ticker universe, fetches price history, applies tradeability gates,
-scores each ticker with the signal stack, and saves the ranked watchlist.
+scores each ticker with the signal stack, adds company/news insight scores,
+and saves the ranked watchlist.
 
-Current signal stack:
+Current market signal stack:
 - momentum_12_1
 - insider_buy_score
 - volume_pressure_score
 - capital_efficiency_score
 - relative_strength_score
 
-Relative strength needs benchmark bars, so this file fetches SPY and QQQ once
-and passes them into every ticker's signal data.
+Company/news insight layer:
+- filing_catalyst_score
+- dilution_risk_score
+- reverse_split_risk_score
+- company_quality_score
+- news_catalyst_score
+
+Notes:
+- relative_strength_score needs SPY/QQQ benchmark bars.
+- company/news insights use company_insights.py.
 """
 
 import os
 import json
 import logging
 from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -33,6 +42,11 @@ try:
     from universe_builder import build_dynamic_universe
 except Exception:
     build_dynamic_universe = None
+
+try:
+    from company_insights import analyze_ticker
+except Exception:
+    analyze_ticker = None
 
 
 logging.basicConfig(
@@ -54,6 +68,13 @@ MIN_DOLLAR_VOLUME = float(os.getenv("MIN_DOLLAR_VOLUME", "250000"))
 
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "30"))
 PRICE_HISTORY_DAYS = int(os.getenv("PRICE_HISTORY_DAYS", "400"))
+
+ENABLE_COMPANY_INSIGHTS = os.getenv("ENABLE_COMPANY_INSIGHTS", "true").lower() in {
+    "1",
+    "true",
+    "yes",
+    "y",
+}
 
 BENCHMARK_TICKERS = [
     x.strip().upper()
@@ -95,12 +116,30 @@ DEFAULT_UNIVERSE = [
 ]
 
 
+COMPANY_INSIGHT_SIGNAL_NAMES = [
+    "filing_catalyst_score",
+    "dilution_risk_score",
+    "reverse_split_risk_score",
+    "company_quality_score",
+    "news_catalyst_score",
+]
+
+
 DEFAULT_SIGNAL_WEIGHTS = {
     "momentum_12_1": 1.00,
     "insider_buy_score": 0.35,
     "volume_pressure_score": 0.60,
     "capital_efficiency_score": 0.55,
     "relative_strength_score": 0.50,
+
+    # Company/news layer.
+    # dilution_risk_score and reverse_split_risk_score are already negative numbers,
+    # so positive weights turn them into penalties.
+    "filing_catalyst_score": 0.45,
+    "dilution_risk_score": 0.80,
+    "reverse_split_risk_score": 0.65,
+    "company_quality_score": 0.35,
+    "news_catalyst_score": 0.30,
 }
 
 
@@ -119,32 +158,34 @@ def clean_ticker(ticker: str) -> str:
 
 def parse_signal_weights() -> dict:
     """
-    Allows optional env override:
+    Optional env override:
 
-    SIGNAL_WEIGHTS_JSON='{"momentum_12_1":1.0,"relative_strength_score":0.5}'
+    SIGNAL_WEIGHTS_JSON='{"relative_strength_score":0.4,"dilution_risk_score":1.0}'
+
+    This now merges overrides into defaults instead of replacing everything.
     """
     raw = os.getenv("SIGNAL_WEIGHTS_JSON", "").strip()
 
+    weights = dict(DEFAULT_SIGNAL_WEIGHTS)
+
     if not raw:
-        return DEFAULT_SIGNAL_WEIGHTS
+        return weights
 
     try:
         parsed = json.loads(raw)
 
         if not isinstance(parsed, dict):
             log.warning("SIGNAL_WEIGHTS_JSON was not a dict; using defaults")
-            return DEFAULT_SIGNAL_WEIGHTS
-
-        weights = {}
+            return weights
 
         for key, value in parsed.items():
             weights[str(key)] = float(value)
 
-        return weights or DEFAULT_SIGNAL_WEIGHTS
+        return weights
 
     except Exception as exc:
         log.warning("Failed parsing SIGNAL_WEIGHTS_JSON; using defaults: %s", exc)
-        return DEFAULT_SIGNAL_WEIGHTS
+        return weights
 
 
 def get_universe() -> list[str]:
@@ -254,11 +295,7 @@ def load_recent_insider_buys(tickers: list[str], days: int = 30) -> dict:
     """
     Loads recent insider buys from DB if available.
 
-    Returns:
-    {
-        "F": [row, row],
-        "OPEN": [row]
-    }
+    Uses seen_at because this DB schema does not have created_at.
     """
     result = {clean_ticker(t): [] for t in tickers}
 
@@ -282,12 +319,8 @@ def load_recent_insider_buys(tickers: list[str], days: int = 30) -> dict:
                         SELECT *
                         FROM insider_buys
                         WHERE UPPER(ticker) = ANY(%s)
-                          AND COALESCE(
-                                NULLIF(filed_at, '')::timestamp,
-                                created_at,
-                                NOW()
-                              ) >= %s
-                        ORDER BY filed_at DESC NULLS LAST, created_at DESC NULLS LAST
+                          AND seen_at >= %s
+                        ORDER BY seen_at DESC NULLS LAST, filed_at DESC NULLS LAST
                         """,
                         [[clean_ticker(t) for t in tickers], cutoff],
                     )
@@ -340,6 +373,56 @@ def load_benchmark_bars() -> dict:
     return benchmarks
 
 
+def neutral_company_insights(ticker: str, reason: str = "company insights unavailable") -> dict:
+    return {
+        "ticker": ticker,
+        "ok": False,
+        "reason": reason,
+        "scores": {
+            "filing_catalyst_score": 0.0,
+            "dilution_risk_score": 0.0,
+            "reverse_split_risk_score": 0.0,
+            "company_quality_score": 0.0,
+            "news_catalyst_score": 0.0,
+            "company_insight_composite": 0.0,
+        },
+        "reasons": {},
+        "recent_filings": [],
+        "recent_news": [],
+        "facts": {},
+    }
+
+
+def load_company_insight(ticker: str, price: float) -> dict:
+    if not ENABLE_COMPANY_INSIGHTS:
+        return neutral_company_insights(ticker, reason="ENABLE_COMPANY_INSIGHTS=false")
+
+    if analyze_ticker is None:
+        return neutral_company_insights(ticker, reason="company_insights.py import failed")
+
+    try:
+        result = analyze_ticker(ticker, price=price)
+
+        scores = (result or {}).get("scores") or {}
+
+        log.info(
+            "%s company insight: filing=%+.2f dilution=%+.2f split=%+.2f quality=%+.2f news=%+.2f composite=%+.2f",
+            ticker,
+            safe_float(scores.get("filing_catalyst_score"), 0.0),
+            safe_float(scores.get("dilution_risk_score"), 0.0),
+            safe_float(scores.get("reverse_split_risk_score"), 0.0),
+            safe_float(scores.get("company_quality_score"), 0.0),
+            safe_float(scores.get("news_catalyst_score"), 0.0),
+            safe_float(scores.get("company_insight_composite"), 0.0),
+        )
+
+        return result or neutral_company_insights(ticker, reason="empty company insight result")
+
+    except Exception as exc:
+        log.warning("%s company insight failed: %s", ticker, exc)
+        return neutral_company_insights(ticker, reason=str(exc))
+
+
 def build_universe_data(tickers: list[str]) -> dict:
     insider_buys_by_ticker = load_recent_insider_buys(
         tickers,
@@ -370,14 +453,18 @@ def build_universe_data(tickers: list[str]) -> dict:
         if not passes_tradeability_price_gate(ticker, bars):
             continue
 
+        price = last_close(bars)
+        company_insights = load_company_insight(ticker, price)
+
         data[ticker] = {
             "ticker": ticker,
             "bars": bars,
-            "price": last_close(bars),
+            "price": price,
             "avg_dollar_volume_20": avg_dollar_volume(bars, 20),
             "insider_buys": insider_buys_by_ticker.get(ticker, []),
             "recent_insider_buy_count": len(insider_buys_by_ticker.get(ticker, [])),
             "benchmark_bars": benchmark_bars,
+            "company_insights": company_insights,
         }
 
     return data
@@ -395,6 +482,7 @@ def score_universe(
         signal_values = {}
         composite = 0.0
 
+        # Market/technical/insider signals from signals.py.
         for name, fn in signals.items():
             try:
                 value = float(fn(ticker_data))
@@ -404,6 +492,21 @@ def score_universe(
 
             signal_values[name] = value
             composite += value * float(weights.get(name, 0.0))
+
+        # Company/news insight signals from company_insights.py result.
+        company = ticker_data.get("company_insights") or {}
+        company_scores = company.get("scores") or {}
+
+        for name in COMPANY_INSIGHT_SIGNAL_NAMES:
+            value = safe_float(company_scores.get(name), 0.0)
+            signal_values[name] = value
+            composite += value * float(weights.get(name, 0.0))
+
+        # Diagnostic only; not weighted directly to avoid double-counting.
+        signal_values["company_insight_composite"] = safe_float(
+            company_scores.get("company_insight_composite"),
+            0.0,
+        )
 
         ranked.append(
             {
@@ -423,8 +526,7 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
     """
     Saves ranked rows directly to watchlist_scores.
 
-    This avoids depending on a fragile db.save_watchlist signature and keeps
-    same-day reruns clean by deleting the run_date first.
+    Same-day reruns are clean because the run_date is deleted first.
     """
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL env var is required")
@@ -477,12 +579,15 @@ def main() -> None:
     universe = get_universe()
     weights = parse_signal_weights()
 
+    all_signal_names = list(SIGNALS.keys()) + COMPANY_INSIGHT_SIGNAL_NAMES
+
     log.info(
         "Scoring up to %d candidates on signals: %s",
         len(universe),
-        ", ".join(SIGNALS),
+        ", ".join(all_signal_names),
     )
     log.info("Signal weights: %s", weights)
+    log.info("Company insights enabled: %s", ENABLE_COMPANY_INSIGHTS)
 
     data = build_universe_data(universe)
 
