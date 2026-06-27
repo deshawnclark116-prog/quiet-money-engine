@@ -3,26 +3,21 @@
 Quiet Money Engine — universe scorer.
 
 Builds a ticker universe, fetches price history, applies tradeability gates,
-scores each ticker with the signal stack, adds company/news insight scores,
-and saves the ranked watchlist.
+scores each ticker, adds company/news insight, and saves the ranked watchlist.
 
-Current market signal stack:
+Current stock-side engine:
 - momentum_12_1
 - insider_buy_score
 - volume_pressure_score
 - capital_efficiency_score
 - relative_strength_score
-
-Company/news insight layer:
 - filing_catalyst_score
-- dilution_risk_score
-- reverse_split_risk_score
 - company_quality_score
 - news_catalyst_score
+- dilution_risk_score
+- reverse_split_risk_score
 
-Notes:
-- relative_strength_score needs SPY/QQQ benchmark bars.
-- company/news insights use company_insights.py.
+Options are parked for later.
 """
 
 import os
@@ -76,6 +71,13 @@ ENABLE_COMPANY_INSIGHTS = os.getenv("ENABLE_COMPANY_INSIGHTS", "true").lower() i
     "y",
 }
 
+COMPANY_INSIGHT_TOP_N = int(
+    os.getenv(
+        "COMPANY_INSIGHT_TOP_N",
+        str(max(MAX_UNIVERSE_SIZE * 2, 35)),
+    )
+)
+
 BENCHMARK_TICKERS = [
     x.strip().upper()
     for x in os.getenv("BENCHMARK_TICKERS", "SPY,QQQ").split(",")
@@ -116,15 +118,6 @@ DEFAULT_UNIVERSE = [
 ]
 
 
-COMPANY_INSIGHT_SIGNAL_NAMES = [
-    "filing_catalyst_score",
-    "dilution_risk_score",
-    "reverse_split_risk_score",
-    "company_quality_score",
-    "news_catalyst_score",
-]
-
-
 DEFAULT_SIGNAL_WEIGHTS = {
     "momentum_12_1": 1.00,
     "insider_buy_score": 0.35,
@@ -132,15 +125,28 @@ DEFAULT_SIGNAL_WEIGHTS = {
     "capital_efficiency_score": 0.55,
     "relative_strength_score": 0.50,
 
-    # Company/news layer.
-    # dilution_risk_score and reverse_split_risk_score are already negative numbers,
-    # so positive weights turn them into penalties.
-    "filing_catalyst_score": 0.45,
-    "dilution_risk_score": 0.80,
-    "reverse_split_risk_score": 0.65,
-    "company_quality_score": 0.35,
-    "news_catalyst_score": 0.30,
+    # Company / filing / news insight layer.
+    "filing_catalyst_score": 0.35,
+    "company_quality_score": 0.30,
+    "news_catalyst_score": 0.25,
+
+    # These scores are already negative when risky, so use positive weights.
+    "dilution_risk_score": 0.90,
+    "reverse_split_risk_score": 0.70,
+
+    # Display-only. Do not double-count this because it already combines pieces.
+    "company_insight_composite": 0.00,
 }
+
+
+COMPANY_INSIGHT_SCORE_KEYS = [
+    "filing_catalyst_score",
+    "dilution_risk_score",
+    "reverse_split_risk_score",
+    "company_quality_score",
+    "news_catalyst_score",
+    "company_insight_composite",
+]
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -158,34 +164,32 @@ def clean_ticker(ticker: str) -> str:
 
 def parse_signal_weights() -> dict:
     """
-    Optional env override:
+    Allows optional env override:
 
-    SIGNAL_WEIGHTS_JSON='{"relative_strength_score":0.4,"dilution_risk_score":1.0}'
-
-    This now merges overrides into defaults instead of replacing everything.
+    SIGNAL_WEIGHTS_JSON='{"momentum_12_1":1.0,"relative_strength_score":0.5}'
     """
     raw = os.getenv("SIGNAL_WEIGHTS_JSON", "").strip()
 
-    weights = dict(DEFAULT_SIGNAL_WEIGHTS)
-
     if not raw:
-        return weights
+        return DEFAULT_SIGNAL_WEIGHTS
 
     try:
         parsed = json.loads(raw)
 
         if not isinstance(parsed, dict):
             log.warning("SIGNAL_WEIGHTS_JSON was not a dict; using defaults")
-            return weights
+            return DEFAULT_SIGNAL_WEIGHTS
+
+        weights = {}
 
         for key, value in parsed.items():
             weights[str(key)] = float(value)
 
-        return weights
+        return weights or DEFAULT_SIGNAL_WEIGHTS
 
     except Exception as exc:
         log.warning("Failed parsing SIGNAL_WEIGHTS_JSON; using defaults: %s", exc)
-        return weights
+        return DEFAULT_SIGNAL_WEIGHTS
 
 
 def get_universe() -> list[str]:
@@ -293,9 +297,9 @@ def passes_tradeability_price_gate(ticker: str, bars: list[dict]) -> bool:
 
 def load_recent_insider_buys(tickers: list[str], days: int = 30) -> dict:
     """
-    Loads recent insider buys from DB if available.
+    Loads recent insider buys from DB.
 
-    Uses seen_at because this DB schema does not have created_at.
+    The actual insider_buys table uses seen_at, not created_at.
     """
     result = {clean_ticker(t): [] for t in tickers}
 
@@ -373,56 +377,6 @@ def load_benchmark_bars() -> dict:
     return benchmarks
 
 
-def neutral_company_insights(ticker: str, reason: str = "company insights unavailable") -> dict:
-    return {
-        "ticker": ticker,
-        "ok": False,
-        "reason": reason,
-        "scores": {
-            "filing_catalyst_score": 0.0,
-            "dilution_risk_score": 0.0,
-            "reverse_split_risk_score": 0.0,
-            "company_quality_score": 0.0,
-            "news_catalyst_score": 0.0,
-            "company_insight_composite": 0.0,
-        },
-        "reasons": {},
-        "recent_filings": [],
-        "recent_news": [],
-        "facts": {},
-    }
-
-
-def load_company_insight(ticker: str, price: float) -> dict:
-    if not ENABLE_COMPANY_INSIGHTS:
-        return neutral_company_insights(ticker, reason="ENABLE_COMPANY_INSIGHTS=false")
-
-    if analyze_ticker is None:
-        return neutral_company_insights(ticker, reason="company_insights.py import failed")
-
-    try:
-        result = analyze_ticker(ticker, price=price)
-
-        scores = (result or {}).get("scores") or {}
-
-        log.info(
-            "%s company insight: filing=%+.2f dilution=%+.2f split=%+.2f quality=%+.2f news=%+.2f composite=%+.2f",
-            ticker,
-            safe_float(scores.get("filing_catalyst_score"), 0.0),
-            safe_float(scores.get("dilution_risk_score"), 0.0),
-            safe_float(scores.get("reverse_split_risk_score"), 0.0),
-            safe_float(scores.get("company_quality_score"), 0.0),
-            safe_float(scores.get("news_catalyst_score"), 0.0),
-            safe_float(scores.get("company_insight_composite"), 0.0),
-        )
-
-        return result or neutral_company_insights(ticker, reason="empty company insight result")
-
-    except Exception as exc:
-        log.warning("%s company insight failed: %s", ticker, exc)
-        return neutral_company_insights(ticker, reason=str(exc))
-
-
 def build_universe_data(tickers: list[str]) -> dict:
     insider_buys_by_ticker = load_recent_insider_buys(
         tickers,
@@ -453,21 +407,59 @@ def build_universe_data(tickers: list[str]) -> dict:
         if not passes_tradeability_price_gate(ticker, bars):
             continue
 
-        price = last_close(bars)
-        company_insights = load_company_insight(ticker, price)
-
         data[ticker] = {
             "ticker": ticker,
             "bars": bars,
-            "price": price,
+            "price": last_close(bars),
             "avg_dollar_volume_20": avg_dollar_volume(bars, 20),
             "insider_buys": insider_buys_by_ticker.get(ticker, []),
             "recent_insider_buy_count": len(insider_buys_by_ticker.get(ticker, [])),
             "benchmark_bars": benchmark_bars,
-            "company_insights": company_insights,
         }
 
     return data
+
+
+def get_company_insight_scores(ticker: str, price: Optional[float] = None) -> dict:
+    """
+    Returns numeric company/news insight scores.
+
+    Fails open/neutral so SEC/Finnhub problems do not break the scorer.
+    """
+    neutral = {key: 0.0 for key in COMPANY_INSIGHT_SCORE_KEYS}
+
+    if not ENABLE_COMPANY_INSIGHTS:
+        return neutral
+
+    if analyze_ticker is None:
+        log.warning("company_insights module unavailable; company insight scores neutral")
+        return neutral
+
+    try:
+        result = analyze_ticker(ticker, price=price)
+        scores = result.get("scores") or {}
+
+        out = {}
+
+        for key in COMPANY_INSIGHT_SCORE_KEYS:
+            out[key] = safe_float(scores.get(key), 0.0)
+
+        log.info(
+            "%s company insight: filing %+0.2f | dilution %+0.2f | split %+0.2f | quality %+0.2f | news %+0.2f | composite %+0.2f",
+            ticker,
+            out["filing_catalyst_score"],
+            out["dilution_risk_score"],
+            out["reverse_split_risk_score"],
+            out["company_quality_score"],
+            out["news_catalyst_score"],
+            out["company_insight_composite"],
+        )
+
+        return out
+
+    except Exception as exc:
+        log.warning("%s company insight failed; using neutral scores: %s", ticker, exc)
+        return neutral
 
 
 def score_universe(
@@ -478,11 +470,11 @@ def score_universe(
     weights = weights or DEFAULT_SIGNAL_WEIGHTS
     ranked = []
 
+    # First pass: technical / market / insider signals.
     for ticker, ticker_data in data.items():
         signal_values = {}
         composite = 0.0
 
-        # Market/technical/insider signals from signals.py.
         for name, fn in signals.items():
             try:
                 value = float(fn(ticker_data))
@@ -492,21 +484,6 @@ def score_universe(
 
             signal_values[name] = value
             composite += value * float(weights.get(name, 0.0))
-
-        # Company/news insight signals from company_insights.py result.
-        company = ticker_data.get("company_insights") or {}
-        company_scores = company.get("scores") or {}
-
-        for name in COMPANY_INSIGHT_SIGNAL_NAMES:
-            value = safe_float(company_scores.get(name), 0.0)
-            signal_values[name] = value
-            composite += value * float(weights.get(name, 0.0))
-
-        # Diagnostic only; not weighted directly to avoid double-counting.
-        signal_values["company_insight_composite"] = safe_float(
-            company_scores.get("company_insight_composite"),
-            0.0,
-        )
 
         ranked.append(
             {
@@ -519,6 +496,26 @@ def score_universe(
         )
 
     ranked.sort(key=lambda row: row["composite"], reverse=True)
+
+    # Second pass: company/news insight layer.
+    # Analyze top candidates only to control SEC/Finnhub API usage.
+    if ENABLE_COMPANY_INSIGHTS and ranked:
+        n = min(COMPANY_INSIGHT_TOP_N, len(ranked))
+        log.info("Applying company/news insight layer to top %d candidates", n)
+
+        for row in ranked[:n]:
+            ticker = row["ticker"]
+            price = safe_float(row.get("price_at_signal"), 0.0)
+
+            insight_scores = get_company_insight_scores(ticker, price=price)
+
+            for name, value in insight_scores.items():
+                value = safe_float(value, 0.0)
+                row["signals"][name] = value
+                row["composite"] += value * float(weights.get(name, 0.0))
+
+        ranked.sort(key=lambda row: row["composite"], reverse=True)
+
     return ranked
 
 
@@ -526,7 +523,7 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
     """
     Saves ranked rows directly to watchlist_scores.
 
-    Same-day reruns are clean because the run_date is deleted first.
+    Same-day reruns are clean because this deletes the run_date first.
     """
     if not DATABASE_URL:
         raise RuntimeError("DATABASE_URL env var is required")
@@ -579,15 +576,17 @@ def main() -> None:
     universe = get_universe()
     weights = parse_signal_weights()
 
-    all_signal_names = list(SIGNALS.keys()) + COMPANY_INSIGHT_SIGNAL_NAMES
-
     log.info(
         "Scoring up to %d candidates on signals: %s",
         len(universe),
-        ", ".join(all_signal_names),
+        ", ".join(SIGNALS),
     )
     log.info("Signal weights: %s", weights)
-    log.info("Company insights enabled: %s", ENABLE_COMPANY_INSIGHTS)
+    log.info(
+        "Company/news insights enabled=%s top_n=%d",
+        ENABLE_COMPANY_INSIGHTS,
+        COMPANY_INSIGHT_TOP_N,
+    )
 
     data = build_universe_data(universe)
 
