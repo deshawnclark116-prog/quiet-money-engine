@@ -4,14 +4,21 @@ Quiet Money Engine — signal library.
 
 Signals return numeric scores. Higher = better.
 
-Current signal stack:
+Market / behavior signals:
 - momentum_12_1
-- volume_pressure_score
 - insider_buy_score
+- volume_pressure_score
 - capital_efficiency_score
 - relative_strength_score
 
-relative_strength_score is comparative strength vs SPY/QQQ.
+Technical quality stack:
+- accumulation_quality_score
+- trend_quality_score
+- breakout_setup_score
+- liquidity_quality_score
+- volatility_control_score
+
+relative_strength_score compares against SPY/QQQ.
 It is NOT RSI.
 """
 
@@ -115,9 +122,6 @@ def _avg_dollar_volume(bars: List[dict], window: int = 20) -> float:
 
     sample = bars[-window:]
 
-    if not sample:
-        return 0.0
-
     vals = []
 
     for bar in sample:
@@ -144,6 +148,80 @@ def _avg_volume(bars: List[dict], window: int = 20) -> float:
         for bar in sample
         if _safe_float(bar.get("volume"), 0.0) > 0
     ]
+
+    if not vals:
+        return 0.0
+
+    return sum(vals) / len(vals)
+
+
+def _moving_average(values: List[float], window: int) -> Optional[float]:
+    if len(values) < window:
+        return None
+
+    sample = values[-window:]
+
+    if not sample:
+        return None
+
+    return sum(sample) / len(sample)
+
+
+def _stddev(values: List[float]) -> float:
+    if len(values) < 2:
+        return 0.0
+
+    mean = sum(values) / len(values)
+    var = sum((x - mean) ** 2 for x in values) / (len(values) - 1)
+
+    return math.sqrt(max(var, 0.0))
+
+
+def _daily_returns(bars: List[dict], window: int = 20) -> List[float]:
+    if len(bars) < 2:
+        return []
+
+    sample = bars[-(window + 1):]
+
+    returns = []
+
+    for i in range(1, len(sample)):
+        prev = _safe_float(sample[i - 1].get("close"), 0.0)
+        cur = _safe_float(sample[i].get("close"), 0.0)
+
+        if prev > 0 and cur > 0:
+            returns.append((cur / prev) - 1.0)
+
+    return returns
+
+
+def _close_location_value(bar: dict) -> float:
+    high = _safe_float(bar.get("high"), 0.0)
+    low = _safe_float(bar.get("low"), 0.0)
+    close = _safe_float(bar.get("close"), 0.0)
+
+    if high <= low or close <= 0:
+        return 0.5
+
+    return max(0.0, min(1.0, (close - low) / (high - low)))
+
+
+def _true_range_pct(bars: List[dict], window: int = 20) -> float:
+    if len(bars) < 2:
+        return 0.0
+
+    sample = bars[-window:]
+    vals = []
+
+    for i, bar in enumerate(sample):
+        high = _safe_float(bar.get("high"), 0.0)
+        low = _safe_float(bar.get("low"), 0.0)
+        close = _safe_float(bar.get("close"), 0.0)
+
+        if high <= 0 or low <= 0 or close <= 0:
+            continue
+
+        vals.append((high - low) / close)
 
     if not vals:
         return 0.0
@@ -223,16 +301,6 @@ def momentum_12_1(data: Dict[str, Any]) -> float:
 def volume_pressure_score(data: Dict[str, Any]) -> float:
     """
     Looks for demand/accumulation pressure.
-
-    Rewards:
-    - recent volume above baseline
-    - recent dollar volume expansion
-    - up-volume beating down-volume
-    - positive price follow-through
-
-    Penalizes:
-    - huge volume with weak/negative follow-through
-    - thin or stale volume
     """
     bars = _bars(data)
 
@@ -336,8 +404,6 @@ def _extract_insider_count(data: Dict[str, Any]) -> int:
 def insider_buy_score(data: Dict[str, Any]) -> float:
     """
     Lightweight insider-buy confirmation score.
-
-    This stays conservative so one insider buy does not dominate the engine.
     """
     count = _extract_insider_count(data)
 
@@ -363,18 +429,6 @@ def insider_buy_score(data: Dict[str, Any]) -> float:
 def capital_efficiency_score(data: Dict[str, Any]) -> float:
     """
     Small-account opportunity score.
-
-    Rewards:
-    - cheap stocks that are still liquid enough to trade
-    - $1-$5 sweet spot
-    - $5-$10 secondary zone
-    - some larger optionable-proxy names, so the engine does not ignore
-      expensive stocks that may be playable through options later
-
-    Penalizes:
-    - ultra-cheap dead liquidity
-    - under $0.25 names
-    - expensive names with no optionability proxy
     """
     ticker = _ticker(data)
     bars = _bars(data)
@@ -446,16 +500,8 @@ def capital_efficiency_score(data: Dict[str, Any]) -> float:
 
 def relative_strength_score(data: Dict[str, Any]) -> float:
     """
-    Comparative relative strength.
-
+    Comparative relative strength vs SPY/QQQ.
     This is NOT RSI.
-
-    It rewards stocks that outperform SPY/QQQ over multiple windows.
-
-    Goal:
-    - cheap stock rising faster than the market = good
-    - cheap stock holding up while market is weak = good
-    - stock rising only because everything is rising = less impressive
     """
     bars = _bars(data)
 
@@ -529,10 +575,410 @@ def relative_strength_score(data: Dict[str, Any]) -> float:
     return _clamp(score, -2.5, 2.5)
 
 
+def accumulation_quality_score(data: Dict[str, Any]) -> float:
+    """
+    Detects clean accumulation.
+
+    Rewards:
+    - up days on stronger volume
+    - down days on lighter volume
+    - closes near the high of the daily range
+    - steady recent demand
+
+    Penalizes:
+    - heavy-volume down days
+    - ugly closing location
+    - blowoff-style volume without follow-through
+    """
+    bars = _bars(data)
+
+    if len(bars) < 30:
+        return 0.0
+
+    recent = bars[-20:]
+    base = bars[-80:-20] if len(bars) >= 90 else bars[:-20]
+
+    if len(recent) < 10 or not base:
+        return 0.0
+
+    up_volume = 0.0
+    down_volume = 0.0
+    up_days = 0
+    down_days = 0
+    clv_values = []
+    heavy_red_days = 0
+
+    avg_recent_vol = _avg_volume(recent, len(recent))
+
+    for i in range(1, len(recent)):
+        today = recent[i]
+        yesterday = recent[i - 1]
+
+        close_today = _safe_float(today.get("close"), 0.0)
+        close_yesterday = _safe_float(yesterday.get("close"), 0.0)
+        volume = _safe_float(today.get("volume"), 0.0)
+        clv = _close_location_value(today)
+
+        clv_values.append(clv)
+
+        if close_today >= close_yesterday:
+            up_volume += volume
+            up_days += 1
+        else:
+            down_volume += volume
+            down_days += 1
+
+            if avg_recent_vol > 0 and volume > avg_recent_vol * 1.5 and clv < 0.35:
+                heavy_red_days += 1
+
+    avg_clv = sum(clv_values) / len(clv_values) if clv_values else 0.5
+
+    up_down_volume_ratio = up_volume / max(down_volume, 1.0)
+    up_day_ratio = up_days / max(up_days + down_days, 1)
+
+    recent_dv = _avg_dollar_volume(recent, len(recent))
+    base_dv = _avg_dollar_volume(base, len(base))
+    dollar_volume_ratio = recent_dv / max(base_dv, 1.0)
+
+    r_20 = _return_over_bars(bars, 20) or 0.0
+    r_5 = _return_over_bars(bars, 5) or 0.0
+
+    score = 0.0
+
+    score += math.log(max(up_down_volume_ratio, 0.01)) * 0.70
+    score += (avg_clv - 0.50) * 1.75
+    score += (up_day_ratio - 0.50) * 1.25
+    score += math.log(max(dollar_volume_ratio, 0.01)) * 0.35
+    score += r_20 * 0.80
+    score += r_5 * 0.35
+
+    if heavy_red_days >= 2:
+        score -= 0.85
+    elif heavy_red_days == 1:
+        score -= 0.35
+
+    if avg_clv < 0.35 and r_20 > 0:
+        score -= 0.55
+
+    if dollar_volume_ratio > 2.5 and r_5 < 0:
+        score -= 0.65
+
+    return _clamp(score, -3.0, 3.0)
+
+
+def trend_quality_score(data: Dict[str, Any]) -> float:
+    """
+    Rewards clean trend structure instead of random spikes.
+    """
+    bars = _bars(data)
+
+    if len(bars) < 60:
+        return 0.0
+
+    closes = [_safe_float(b.get("close"), 0.0) for b in bars if _safe_float(b.get("close"), 0.0) > 0]
+
+    if len(closes) < 60:
+        return 0.0
+
+    price = closes[-1]
+    ma10 = _moving_average(closes, 10)
+    ma20 = _moving_average(closes, 20)
+    ma50 = _moving_average(closes, 50)
+
+    if not ma10 or not ma20 or not ma50:
+        return 0.0
+
+    r_20 = _return_over_bars(bars, 20) or 0.0
+    r_60 = _return_over_bars(bars, 60) or 0.0
+
+    recent_lows = [_safe_float(b.get("low"), 0.0) for b in bars[-20:] if _safe_float(b.get("low"), 0.0) > 0]
+    prior_lows = [_safe_float(b.get("low"), 0.0) for b in bars[-40:-20] if _safe_float(b.get("low"), 0.0) > 0]
+
+    recent_highs = [_safe_float(b.get("high"), 0.0) for b in bars[-20:] if _safe_float(b.get("high"), 0.0) > 0]
+    prior_highs = [_safe_float(b.get("high"), 0.0) for b in bars[-40:-20] if _safe_float(b.get("high"), 0.0) > 0]
+
+    score = 0.0
+
+    if price > ma10 > ma20 > ma50:
+        score += 1.00
+    elif price > ma20 > ma50:
+        score += 0.55
+    elif price > ma50:
+        score += 0.25
+    else:
+        score -= 0.60
+
+    if r_20 > 0:
+        score += min(r_20 * 1.2, 0.80)
+
+    if r_60 > 0:
+        score += min(r_60 * 0.8, 0.75)
+
+    if recent_lows and prior_lows and min(recent_lows) > min(prior_lows):
+        score += 0.35
+
+    if recent_highs and prior_highs and max(recent_highs) > max(prior_highs):
+        score += 0.35
+
+    recent_returns = _daily_returns(bars, 20)
+    vol = _stddev(recent_returns)
+
+    if vol > 0.18:
+        score -= 0.75
+    elif vol > 0.12:
+        score -= 0.35
+    elif 0.025 <= vol <= 0.10:
+        score += 0.20
+
+    high_60 = max(closes[-60:])
+    drawdown_from_60_high = (price / high_60) - 1.0 if high_60 > 0 else 0.0
+
+    if drawdown_from_60_high < -0.35:
+        score -= 0.80
+    elif drawdown_from_60_high > -0.10:
+        score += 0.25
+
+    return _clamp(score, -3.0, 3.0)
+
+
+def breakout_setup_score(data: Dict[str, Any]) -> float:
+    """
+    Scores whether a stock is close to a useful breakout zone without being too extended.
+    """
+    bars = _bars(data)
+
+    if len(bars) < 60:
+        return 0.0
+
+    closes = [_safe_float(b.get("close"), 0.0) for b in bars]
+    highs = [_safe_float(b.get("high"), 0.0) for b in bars]
+    volumes = [_safe_float(b.get("volume"), 0.0) for b in bars]
+
+    price = closes[-1]
+
+    if price <= 0:
+        return 0.0
+
+    high_20 = max(highs[-20:])
+    high_60 = max(highs[-60:])
+    prior_high_20 = max(highs[-21:-1]) if len(highs) >= 21 else high_20
+
+    ma20 = _moving_average(closes, 20)
+    avg_vol_20 = sum(volumes[-20:]) / 20 if len(volumes) >= 20 else 0.0
+    avg_vol_60 = sum(volumes[-60:]) / 60 if len(volumes) >= 60 else avg_vol_20
+
+    r_5 = _return_over_bars(bars, 5) or 0.0
+    r_20 = _return_over_bars(bars, 20) or 0.0
+
+    distance_to_20_high = (price / high_20) - 1.0 if high_20 > 0 else 0.0
+    distance_to_60_high = (price / high_60) - 1.0 if high_60 > 0 else 0.0
+    extension_from_ma20 = (price / ma20) - 1.0 if ma20 and ma20 > 0 else 0.0
+    volume_expansion = avg_vol_20 / max(avg_vol_60, 1.0)
+
+    score = 0.0
+
+    if distance_to_20_high >= -0.03:
+        score += 0.75
+    elif distance_to_20_high >= -0.08:
+        score += 0.35
+
+    if distance_to_60_high >= -0.05:
+        score += 0.55
+    elif distance_to_60_high >= -0.12:
+        score += 0.20
+
+    if price > prior_high_20:
+        score += 0.45
+
+    if 1.15 <= volume_expansion <= 3.5:
+        score += 0.35
+    elif volume_expansion > 4.5 and r_5 < 0:
+        score -= 0.60
+
+    if 0.02 <= r_20 <= 0.60:
+        score += 0.30
+    elif r_20 > 1.25:
+        score -= 0.90
+
+    if extension_from_ma20 > 0.75:
+        score -= 1.00
+    elif extension_from_ma20 > 0.45:
+        score -= 0.45
+    elif 0.00 <= extension_from_ma20 <= 0.25:
+        score += 0.25
+
+    if r_5 > 0.50:
+        score -= 0.45
+
+    return _clamp(score, -3.0, 3.0)
+
+
+def liquidity_quality_score(data: Dict[str, Any]) -> float:
+    """
+    Measures whether liquidity is strong enough and stable enough to trade.
+
+    This is especially important for cheaper stocks.
+    """
+    bars = _bars(data)
+
+    if len(bars) < 30:
+        return 0.0
+
+    price = _last_close(data)
+    adv20 = _avg_dollar_volume(bars, 20)
+    adv60 = _avg_dollar_volume(bars, 60)
+    avg_vol20 = _avg_volume(bars, 20)
+
+    recent = bars[-20:]
+
+    zero_or_tiny_volume_days = 0
+    dollar_vols = []
+
+    for bar in recent:
+        close = _safe_float(bar.get("close"), 0.0)
+        volume = _safe_float(bar.get("volume"), 0.0)
+
+        if volume <= 0:
+            zero_or_tiny_volume_days += 1
+
+        if close > 0 and volume > 0:
+            dollar_vols.append(close * volume)
+
+    score = 0.0
+
+    if adv20 >= 50_000_000:
+        score += 1.30
+    elif adv20 >= 20_000_000:
+        score += 1.05
+    elif adv20 >= 5_000_000:
+        score += 0.80
+    elif adv20 >= 1_000_000:
+        score += 0.45
+    elif adv20 >= 500_000:
+        score += 0.15
+    else:
+        score -= 0.75
+
+    if price < 1.00:
+        if adv20 >= 2_000_000:
+            score += 0.30
+        elif adv20 < 1_000_000:
+            score -= 0.75
+
+    if price < 0.50 and adv20 < 2_000_000:
+        score -= 0.45
+
+    if adv60 > 0:
+        dv_ratio = adv20 / adv60
+
+        if 0.75 <= dv_ratio <= 2.5:
+            score += 0.25
+        elif dv_ratio > 5.0:
+            score -= 0.35
+        elif dv_ratio < 0.40:
+            score -= 0.35
+
+    if len(dollar_vols) >= 5:
+        mean_dv = sum(dollar_vols) / len(dollar_vols)
+        sd_dv = _stddev(dollar_vols)
+        cv = sd_dv / max(mean_dv, 1.0)
+
+        if cv <= 1.0:
+            score += 0.25
+        elif cv > 2.5:
+            score -= 0.45
+
+    if zero_or_tiny_volume_days >= 2:
+        score -= 0.50
+
+    if avg_vol20 <= 0:
+        score -= 1.00
+
+    return _clamp(score, -3.0, 3.0)
+
+
+def volatility_control_score(data: Dict[str, Any]) -> float:
+    """
+    Rewards tradable volatility and penalizes chaotic volatility.
+
+    We do NOT want to remove volatility entirely because cheap-stock winners move.
+    We want to penalize unstable dump/reversal behavior.
+    """
+    bars = _bars(data)
+
+    if len(bars) < 30:
+        return 0.0
+
+    returns_20 = _daily_returns(bars, 20)
+    returns_60 = _daily_returns(bars, 60)
+
+    if not returns_20:
+        return 0.0
+
+    vol20 = _stddev(returns_20)
+    vol60 = _stddev(returns_60) if returns_60 else vol20
+    atr_pct = _true_range_pct(bars, 20)
+
+    worst_day = min(returns_20) if returns_20 else 0.0
+    best_day = max(returns_20) if returns_20 else 0.0
+
+    closes = [_safe_float(b.get("close"), 0.0) for b in bars]
+    price = closes[-1]
+
+    high_20 = max(closes[-20:])
+    low_20 = min(closes[-20:])
+
+    drawdown_from_20_high = (price / high_20) - 1.0 if high_20 > 0 else 0.0
+    run_from_20_low = (price / low_20) - 1.0 if low_20 > 0 else 0.0
+
+    score = 0.0
+
+    # Sweet spot: enough volatility to move, not so much that it is chaos.
+    if 0.025 <= vol20 <= 0.09:
+        score += 0.70
+    elif 0.09 < vol20 <= 0.14:
+        score += 0.25
+    elif vol20 > 0.18:
+        score -= 1.00
+    elif vol20 < 0.01:
+        score -= 0.25
+
+    if 0.03 <= atr_pct <= 0.16:
+        score += 0.35
+    elif atr_pct > 0.25:
+        score -= 0.85
+
+    if worst_day < -0.20:
+        score -= 1.00
+    elif worst_day < -0.12:
+        score -= 0.45
+
+    if best_day > 0.45 and drawdown_from_20_high < -0.15:
+        score -= 0.75
+
+    if run_from_20_low > 1.50:
+        score -= 0.90
+    elif run_from_20_low > 0.85:
+        score -= 0.35
+
+    if drawdown_from_20_high > -0.08 and worst_day > -0.12:
+        score += 0.25
+
+    if vol60 > 0 and vol20 / max(vol60, 0.0001) > 2.5:
+        score -= 0.45
+
+    return _clamp(score, -3.0, 3.0)
+
+
 SIGNALS = {
     "momentum_12_1": momentum_12_1,
     "insider_buy_score": insider_buy_score,
     "volume_pressure_score": volume_pressure_score,
     "capital_efficiency_score": capital_efficiency_score,
     "relative_strength_score": relative_strength_score,
-        }
+    "accumulation_quality_score": accumulation_quality_score,
+    "trend_quality_score": trend_quality_score,
+    "breakout_setup_score": breakout_setup_score,
+    "liquidity_quality_score": liquidity_quality_score,
+    "volatility_control_score": volatility_control_score,
+    }
