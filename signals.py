@@ -9,11 +9,10 @@ Current signal stack:
 - volume_pressure_score
 - insider_buy_score
 - capital_efficiency_score
+- relative_strength_score
 
-capital_efficiency_score is the small-account filter:
-- rewards cheap, liquid shares
-- does not blindly reward junk penny stocks
-- gives partial credit to larger names that are likely option-play candidates
+relative_strength_score is comparative strength vs SPY/QQQ.
+It is NOT RSI.
 """
 
 import os
@@ -90,6 +89,19 @@ def _return_over_bars(bars: List[dict], lookback: int) -> Optional[float]:
 
     start = _safe_float(bars[-lookback - 1].get("close"), 0.0)
     end = _safe_float(bars[-1].get("close"), 0.0)
+
+    if start <= 0 or end <= 0:
+        return None
+
+    return (end / start) - 1.0
+
+
+def _benchmark_return(benchmark_bars: List[dict], lookback: int) -> Optional[float]:
+    if not benchmark_bars or len(benchmark_bars) <= lookback:
+        return None
+
+    start = _safe_float(benchmark_bars[-lookback - 1].get("close"), 0.0)
+    end = _safe_float(benchmark_bars[-1].get("close"), 0.0)
 
     if start <= 0 or end <= 0:
         return None
@@ -374,14 +386,12 @@ def capital_efficiency_score(data: Dict[str, Any]) -> float:
 
     score = 0.0
 
-    # Share affordability lane.
     if price < 0.25:
         score -= 1.50
 
     elif price < 1.00:
         score += 0.45
 
-        # Under-$1 stocks need stronger liquidity to be useful.
         if avg_dv_20 >= 2_000_000:
             score += 0.65
         elif avg_dv_20 >= 1_000_000:
@@ -416,13 +426,11 @@ def capital_efficiency_score(data: Dict[str, Any]) -> float:
             score += 0.45
 
     else:
-        # Do not punish strong expensive names too much if they are likely optionable.
         if ticker in OPTIONABLE_PROXY_TICKERS:
             score += 0.55
         else:
             score -= 0.25
 
-    # General liquidity quality.
     if avg_dv_20 >= 20_000_000:
         score += 0.25
     elif avg_dv_20 >= 5_000_000:
@@ -430,11 +438,95 @@ def capital_efficiency_score(data: Dict[str, Any]) -> float:
     elif avg_dv_20 < 250_000:
         score -= 0.75
 
-    # Avoid thin micro-trash being rewarded just for low price.
     if price < 1.00 and avg_dv_20 < 500_000:
         score -= 0.50
 
     return _clamp(score, -2.0, 2.5)
+
+
+def relative_strength_score(data: Dict[str, Any]) -> float:
+    """
+    Comparative relative strength.
+
+    This is NOT RSI.
+
+    It rewards stocks that outperform SPY/QQQ over multiple windows.
+
+    Goal:
+    - cheap stock rising faster than the market = good
+    - cheap stock holding up while market is weak = good
+    - stock rising only because everything is rising = less impressive
+    """
+    bars = _bars(data)
+
+    if len(bars) < 35:
+        return 0.0
+
+    benchmark_bars = data.get("benchmark_bars") or {}
+    spy_bars = benchmark_bars.get("SPY") or data.get("spy_bars") or []
+    qqq_bars = benchmark_bars.get("QQQ") or data.get("qqq_bars") or []
+
+    if not spy_bars and not qqq_bars:
+        return 0.0
+
+    windows = [
+        (10, 0.40),
+        (20, 0.80),
+        (60, 1.10),
+        (120, 0.70),
+    ]
+
+    score = 0.0
+    used = 0.0
+
+    for lookback, weight in windows:
+        stock_r = _return_over_bars(bars, lookback)
+
+        if stock_r is None:
+            continue
+
+        benchmark_returns = []
+
+        spy_r = _benchmark_return(spy_bars, lookback)
+        qqq_r = _benchmark_return(qqq_bars, lookback)
+
+        if spy_r is not None:
+            benchmark_returns.append(spy_r)
+
+        if qqq_r is not None:
+            benchmark_returns.append(qqq_r)
+
+        if not benchmark_returns:
+            continue
+
+        hurdle = max(benchmark_returns)
+        excess = stock_r - hurdle
+
+        score += excess * weight * 4.0
+        used += weight
+
+    if used <= 0:
+        return 0.0
+
+    score = score / used
+
+    r_20 = _return_over_bars(bars, 20) or 0.0
+
+    spy_20 = _benchmark_return(spy_bars, 20)
+    qqq_20 = _benchmark_return(qqq_bars, 20)
+
+    benchmark_20s = [x for x in [spy_20, qqq_20] if x is not None]
+
+    if benchmark_20s:
+        hurdle_20 = max(benchmark_20s)
+
+        if r_20 > 0 and hurdle_20 < 0:
+            score += 0.35
+
+        if r_20 < hurdle_20 and hurdle_20 > 0:
+            score -= 0.25
+
+    return _clamp(score, -2.5, 2.5)
 
 
 SIGNALS = {
@@ -442,4 +534,5 @@ SIGNALS = {
     "insider_buy_score": insider_buy_score,
     "volume_pressure_score": volume_pressure_score,
     "capital_efficiency_score": capital_efficiency_score,
-    }
+    "relative_strength_score": relative_strength_score,
+        }
