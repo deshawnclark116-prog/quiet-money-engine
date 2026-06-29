@@ -1024,3 +1024,501 @@ def predictions_by_ticker(
         "count": len(rows),
         "items": clean_rows(rows),
         }
+# ============================================================
+# Quiet Money Engine — model version / performance API endpoints
+# Added for dashboard/API visibility before frontend exists.
+# ============================================================
+
+import os as _qme_os
+import math as _qme_math
+import psycopg2 as _qme_psycopg2
+from psycopg2.extras import RealDictCursor as _QMERealDictCursor
+
+
+def _qme_db_conn():
+    database_url = _qme_os.getenv("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is missing")
+    return _qme_psycopg2.connect(database_url, cursor_factory=_QMERealDictCursor)
+
+
+def _qme_float(value, default=None):
+    try:
+        if value is None or value == "":
+            return default
+        return float(value)
+    except Exception:
+        return default
+
+
+def _qme_pct(value):
+    """
+    DB stores raw_return / excess_return_vs_spy as decimals.
+    Example: 0.0196 = +1.96%
+    """
+    value = _qme_float(value, None)
+    if value is None:
+        return None
+    return round(value * 100.0, 4)
+
+
+def _qme_num(value, digits=4):
+    value = _qme_float(value, None)
+    if value is None:
+        return None
+    return round(value, digits)
+
+
+def _qme_signal_preview(signals):
+    if not isinstance(signals, dict):
+        return {}
+
+    keep = [
+        "momentum_12_1",
+        "relative_strength_score",
+        "accumulation_quality_score",
+        "trend_quality_score",
+        "breakout_setup_score",
+        "liquidity_quality_score",
+        "volatility_control_score",
+        "filing_catalyst_score",
+        "dilution_risk_score",
+        "reverse_split_risk_score",
+        "company_quality_score",
+        "news_catalyst_score",
+    ]
+
+    return {
+        k: _qme_num(signals.get(k), 4)
+        for k in keep
+        if k in signals
+    }
+
+
+@app.get("/api/models/sources")
+def qme_model_sources():
+    """
+    Lists model/source tags currently saved in prediction_snapshots.
+
+    Useful for checking whether quality_heavy_v2 has snapshots and outcomes.
+    """
+    conn = _qme_db_conn()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        s.source,
+                        COUNT(DISTINCT s.id) AS snapshot_count,
+                        COUNT(DISTINCT s.run_date) AS run_count,
+                        MIN(s.run_date) AS first_run_date,
+                        MAX(s.run_date) AS latest_run_date,
+                        COUNT(o.id) AS outcome_count
+                    FROM prediction_snapshots s
+                    LEFT JOIN prediction_outcomes o
+                        ON o.snapshot_id = s.id
+                    GROUP BY s.source
+                    ORDER BY latest_run_date DESC, snapshot_count DESC
+                    """
+                )
+
+                rows = [dict(r) for r in cur.fetchall()]
+
+        return {
+            "ok": True,
+            "sources": rows,
+        }
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/models/latest-snapshots")
+def qme_latest_model_snapshots(source: str = "", limit: int = 25):
+    """
+    Latest saved model-version snapshots.
+
+    Examples:
+    /api/models/latest-snapshots
+    /api/models/latest-snapshots?source=quality_heavy_v2
+    """
+    source = (source or "").strip()
+    limit = max(1, min(int(limit or 25), 100))
+
+    conn = _qme_db_conn()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                if source:
+                    cur.execute(
+                        """
+                        SELECT MAX(run_date) AS latest_run_date
+                        FROM prediction_snapshots
+                        WHERE source = %s
+                        """,
+                        [source],
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT MAX(run_date) AS latest_run_date
+                        FROM prediction_snapshots
+                        """
+                    )
+
+                latest = cur.fetchone()
+                latest_run_date = latest["latest_run_date"] if latest else None
+
+                if not latest_run_date:
+                    return {
+                        "ok": True,
+                        "source": source or "all",
+                        "latest_run_date": None,
+                        "snapshots": [],
+                    }
+
+                if source:
+                    cur.execute(
+                        """
+                        SELECT
+                            run_date,
+                            source,
+                            rank,
+                            ticker,
+                            composite,
+                            price_at_signal,
+                            signals,
+                            created_at
+                        FROM prediction_snapshots
+                        WHERE source = %s
+                          AND run_date = %s
+                        ORDER BY rank ASC
+                        LIMIT %s
+                        """,
+                        [source, latest_run_date, limit],
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT
+                            run_date,
+                            source,
+                            rank,
+                            ticker,
+                            composite,
+                            price_at_signal,
+                            signals,
+                            created_at
+                        FROM prediction_snapshots
+                        WHERE run_date = %s
+                        ORDER BY source ASC, rank ASC
+                        LIMIT %s
+                        """,
+                        [latest_run_date, limit],
+                    )
+
+                rows = []
+
+                for r in cur.fetchall():
+                    row = dict(r)
+                    row["composite"] = _qme_num(row.get("composite"), 4)
+                    row["price_at_signal"] = _qme_num(row.get("price_at_signal"), 4)
+                    row["signal_preview"] = _qme_signal_preview(row.get("signals") or {})
+                    rows.append(row)
+
+        return {
+            "ok": True,
+            "source": source or "all",
+            "latest_run_date": latest_run_date,
+            "count": len(rows),
+            "snapshots": rows,
+        }
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/performance/by-source")
+def qme_performance_by_source():
+    """
+    Performance summary grouped by model source and horizon.
+
+    Uses prediction_outcomes joined to prediction_snapshots.
+    """
+    conn = _qme_db_conn()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(s.source, 'unknown') AS source,
+                        o.horizon_days,
+                        COUNT(*) AS n,
+                        AVG(o.raw_return) AS avg_return,
+                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY o.raw_return) AS median_return,
+                        AVG(o.excess_return_vs_spy) AS avg_excess_vs_spy,
+                        AVG(CASE WHEN o.raw_return > 0 THEN 1.0 ELSE 0.0 END) AS win_rate,
+                        AVG(CASE WHEN o.hit_5pct THEN 1.0 ELSE 0.0 END) AS hit_5pct_rate,
+                        AVG(CASE WHEN o.hit_10pct THEN 1.0 ELSE 0.0 END) AS hit_10pct_rate,
+                        MIN(o.raw_return) AS worst_return,
+                        MAX(o.raw_return) AS best_return
+                    FROM prediction_outcomes o
+                    LEFT JOIN prediction_snapshots s
+                        ON o.snapshot_id = s.id
+                    GROUP BY COALESCE(s.source, 'unknown'), o.horizon_days
+                    ORDER BY source ASC, o.horizon_days ASC
+                    """
+                )
+
+                rows = []
+
+                for r in cur.fetchall():
+                    row = dict(r)
+                    row["avg_return_pct"] = _qme_pct(row.pop("avg_return"))
+                    row["median_return_pct"] = _qme_pct(row.pop("median_return"))
+                    row["avg_excess_vs_spy_pct"] = _qme_pct(row.pop("avg_excess_vs_spy"))
+                    row["win_rate_pct"] = _qme_pct(row.pop("win_rate"))
+                    row["hit_5pct_rate_pct"] = _qme_pct(row.pop("hit_5pct_rate"))
+                    row["hit_10pct_rate_pct"] = _qme_pct(row.pop("hit_10pct_rate"))
+                    row["worst_return_pct"] = _qme_pct(row.pop("worst_return"))
+                    row["best_return_pct"] = _qme_pct(row.pop("best_return"))
+                    rows.append(row)
+
+        return {
+            "ok": True,
+            "performance": rows,
+        }
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/performance/source/{source}")
+def qme_performance_for_source(source: str):
+    """
+    Detailed performance for one model source.
+
+    Example:
+    /api/performance/source/quality_heavy_v2
+    """
+    source = (source or "").strip()
+
+    conn = _qme_db_conn()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        o.horizon_days,
+                        COUNT(*) AS n,
+                        AVG(o.raw_return) AS avg_return,
+                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY o.raw_return) AS median_return,
+                        AVG(o.excess_return_vs_spy) AS avg_excess_vs_spy,
+                        AVG(CASE WHEN o.raw_return > 0 THEN 1.0 ELSE 0.0 END) AS win_rate,
+                        AVG(CASE WHEN o.hit_5pct THEN 1.0 ELSE 0.0 END) AS hit_5pct_rate,
+                        AVG(CASE WHEN o.hit_10pct THEN 1.0 ELSE 0.0 END) AS hit_10pct_rate,
+                        MIN(o.raw_return) AS worst_return,
+                        MAX(o.raw_return) AS best_return
+                    FROM prediction_outcomes o
+                    JOIN prediction_snapshots s
+                        ON o.snapshot_id = s.id
+                    WHERE s.source = %s
+                    GROUP BY o.horizon_days
+                    ORDER BY o.horizon_days ASC
+                    """,
+                    [source],
+                )
+
+                summary = []
+
+                for r in cur.fetchall():
+                    row = dict(r)
+                    row["avg_return_pct"] = _qme_pct(row.pop("avg_return"))
+                    row["median_return_pct"] = _qme_pct(row.pop("median_return"))
+                    row["avg_excess_vs_spy_pct"] = _qme_pct(row.pop("avg_excess_vs_spy"))
+                    row["win_rate_pct"] = _qme_pct(row.pop("win_rate"))
+                    row["hit_5pct_rate_pct"] = _qme_pct(row.pop("hit_5pct_rate"))
+                    row["hit_10pct_rate_pct"] = _qme_pct(row.pop("hit_10pct_rate"))
+                    row["worst_return_pct"] = _qme_pct(row.pop("worst_return"))
+                    row["best_return_pct"] = _qme_pct(row.pop("best_return"))
+                    summary.append(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                        o.ticker,
+                        s.run_date,
+                        s.rank,
+                        s.composite,
+                        o.horizon_days,
+                        o.raw_return,
+                        o.excess_return_vs_spy,
+                        o.hit_5pct,
+                        o.hit_10pct
+                    FROM prediction_outcomes o
+                    JOIN prediction_snapshots s
+                        ON o.snapshot_id = s.id
+                    WHERE s.source = %s
+                    ORDER BY o.horizon_days ASC, o.raw_return DESC
+                    LIMIT 50
+                    """,
+                    [source],
+                )
+
+                outcomes = []
+
+                for r in cur.fetchall():
+                    row = dict(r)
+                    row["composite"] = _qme_num(row.get("composite"), 4)
+                    row["raw_return_pct"] = _qme_pct(row.pop("raw_return"))
+                    row["excess_return_vs_spy_pct"] = _qme_pct(row.pop("excess_return_vs_spy"))
+                    outcomes.append(row)
+
+        return {
+            "ok": True,
+            "source": source,
+            "summary": summary,
+            "recent_or_best_outcomes": outcomes,
+        }
+
+    finally:
+        conn.close()
+
+
+@app.get("/api/dashboard/summary")
+def qme_dashboard_summary(source: str = ""):
+    """
+    One endpoint for a simple frontend/dashboard later.
+
+    Returns:
+    - model source list
+    - latest snapshots/watchlist
+    - performance by source
+    """
+    source = (source or "").strip()
+
+    conn = _qme_db_conn()
+
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        s.source,
+                        COUNT(DISTINCT s.id) AS snapshot_count,
+                        COUNT(DISTINCT s.run_date) AS run_count,
+                        MIN(s.run_date) AS first_run_date,
+                        MAX(s.run_date) AS latest_run_date,
+                        COUNT(o.id) AS outcome_count
+                    FROM prediction_snapshots s
+                    LEFT JOIN prediction_outcomes o
+                        ON o.snapshot_id = s.id
+                    GROUP BY s.source
+                    ORDER BY latest_run_date DESC, snapshot_count DESC
+                    """
+                )
+                sources = [dict(r) for r in cur.fetchall()]
+
+                target_source = source
+
+                if not target_source:
+                    for item in sources:
+                        if item.get("source") == "quality_heavy_v2":
+                            target_source = "quality_heavy_v2"
+                            break
+
+                if not target_source and sources:
+                    target_source = sources[0]["source"]
+
+                latest_snapshots = []
+
+                if target_source:
+                    cur.execute(
+                        """
+                        SELECT MAX(run_date) AS latest_run_date
+                        FROM prediction_snapshots
+                        WHERE source = %s
+                        """,
+                        [target_source],
+                    )
+                    latest_row = cur.fetchone()
+                    latest_run_date = latest_row["latest_run_date"] if latest_row else None
+
+                    if latest_run_date:
+                        cur.execute(
+                            """
+                            SELECT
+                                run_date,
+                                source,
+                                rank,
+                                ticker,
+                                composite,
+                                price_at_signal,
+                                signals,
+                                created_at
+                            FROM prediction_snapshots
+                            WHERE source = %s
+                              AND run_date = %s
+                            ORDER BY rank ASC
+                            LIMIT 25
+                            """,
+                            [target_source, latest_run_date],
+                        )
+
+                        for r in cur.fetchall():
+                            row = dict(r)
+                            row["composite"] = _qme_num(row.get("composite"), 4)
+                            row["price_at_signal"] = _qme_num(row.get("price_at_signal"), 4)
+                            row["signal_preview"] = _qme_signal_preview(row.get("signals") or {})
+                            latest_snapshots.append(row)
+
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(s.source, 'unknown') AS source,
+                        o.horizon_days,
+                        COUNT(*) AS n,
+                        AVG(o.raw_return) AS avg_return,
+                        PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY o.raw_return) AS median_return,
+                        AVG(o.excess_return_vs_spy) AS avg_excess_vs_spy,
+                        AVG(CASE WHEN o.raw_return > 0 THEN 1.0 ELSE 0.0 END) AS win_rate,
+                        AVG(CASE WHEN o.hit_5pct THEN 1.0 ELSE 0.0 END) AS hit_5pct_rate,
+                        AVG(CASE WHEN o.hit_10pct THEN 1.0 ELSE 0.0 END) AS hit_10pct_rate
+                    FROM prediction_outcomes o
+                    LEFT JOIN prediction_snapshots s
+                        ON o.snapshot_id = s.id
+                    GROUP BY COALESCE(s.source, 'unknown'), o.horizon_days
+                    ORDER BY source ASC, o.horizon_days ASC
+                    """
+                )
+
+                performance = []
+
+                for r in cur.fetchall():
+                    row = dict(r)
+                    row["avg_return_pct"] = _qme_pct(row.pop("avg_return"))
+                    row["median_return_pct"] = _qme_pct(row.pop("median_return"))
+                    row["avg_excess_vs_spy_pct"] = _qme_pct(row.pop("avg_excess_vs_spy"))
+                    row["win_rate_pct"] = _qme_pct(row.pop("win_rate"))
+                    row["hit_5pct_rate_pct"] = _qme_pct(row.pop("hit_5pct_rate"))
+                    row["hit_10pct_rate_pct"] = _qme_pct(row.pop("hit_10pct_rate"))
+                    performance.append(row)
+
+        return {
+            "ok": True,
+            "selected_source": target_source,
+            "sources": sources,
+            "latest_snapshots": latest_snapshots,
+            "performance": performance,
+        }
+
+    finally:
+        conn.close()
