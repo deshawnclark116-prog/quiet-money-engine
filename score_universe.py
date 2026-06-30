@@ -3,7 +3,8 @@
 Quiet Money Engine — universe scorer.
 
 Builds a ticker universe, fetches price history, applies tradeability gates,
-scores each ticker, adds company/news insight, and saves the ranked watchlist.
+scores each ticker, adds company/news insight, classifies paper-trade status,
+and saves the ranked watchlist.
 
 Current stock-side engine:
 - momentum_12_1
@@ -16,6 +17,15 @@ Current stock-side engine:
 - news_catalyst_score
 - dilution_risk_score
 - reverse_split_risk_score
+
+Paper-trade fields saved:
+- price_at_signal
+- entry_status
+- entry_reason
+- stop_loss_price
+- first_trim_price
+- max_hold_days
+- trade_rule_version
 
 Options are parked for later.
 """
@@ -63,6 +73,11 @@ MIN_DOLLAR_VOLUME = float(os.getenv("MIN_DOLLAR_VOLUME", "250000"))
 
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "30"))
 PRICE_HISTORY_DAYS = int(os.getenv("PRICE_HISTORY_DAYS", "400"))
+
+TRADE_RULE_VERSION = os.getenv("QME_TRADE_RULE_VERSION", "paper_entry_v1")
+PAPER_MAX_HOLD_DAYS = int(os.getenv("PAPER_MAX_HOLD_DAYS", "20"))
+PAPER_STOP_LOSS_PCT = float(os.getenv("PAPER_STOP_LOSS_PCT", "0.07"))
+PAPER_FIRST_TRIM_PCT = float(os.getenv("PAPER_FIRST_TRIM_PCT", "0.10"))
 
 ENABLE_COMPANY_INSIGHTS = os.getenv("ENABLE_COMPANY_INSIGHTS", "true").lower() in {
     "1",
@@ -519,6 +534,70 @@ def score_universe(
     return ranked
 
 
+def build_paper_trade_plan(row: dict) -> dict:
+    """
+    Converts a ranked model row into a paper-trade status.
+
+    This does not mean "buy immediately."
+    BUY CANDIDATE means it passed the watchlist-level filter and still needs
+    next-session entry confirmation.
+    """
+    signals = row.get("signals") or {}
+
+    rank_value = int(safe_float(row.get("rank"), 9999))
+    composite = safe_float(row.get("composite"), 0.0)
+
+    raw_price = row.get("price_at_signal")
+    price_at_signal = safe_float(raw_price, 0.0)
+
+    if price_at_signal <= 0:
+        price_at_signal = None
+
+    dilution_risk = safe_float(signals.get("dilution_risk_score"), 0.0)
+    reverse_split_risk = safe_float(signals.get("reverse_split_risk_score"), 0.0)
+    liquidity_quality = safe_float(signals.get("liquidity_quality_score"), 0.0)
+    volatility_control = safe_float(signals.get("volatility_control_score"), 0.0)
+
+    major_risk = dilution_risk <= -1.50 or reverse_split_risk <= -1.50
+
+    if price_at_signal is None:
+        entry_status = "WATCH ONLY"
+        entry_reason = "No valid signal price was available, so paper-entry levels could not be calculated."
+    elif major_risk:
+        entry_status = "SKIP / HIGH RISK"
+        entry_reason = "Major dilution or reverse-split risk flag. Do not paper-buy unless risk is manually cleared."
+    elif rank_value <= 10 and composite > 0 and liquidity_quality >= 1.00 and volatility_control >= 0.50:
+        entry_status = "BUY CANDIDATE"
+        entry_reason = (
+            "Top-10 quality setup with acceptable liquidity and volatility profile. "
+            "Paper entry only if next-session open is between -2% and +5% from signal price "
+            "and price holds above the morning low after the first 15–30 minutes."
+        )
+    elif rank_value <= 15:
+        entry_status = "WATCH ONLY"
+        entry_reason = "Ranked setup, but not clean enough for automatic paper-buy status."
+    else:
+        entry_status = "WATCH ONLY"
+        entry_reason = "Outside the top-15 priority zone."
+
+    if price_at_signal is not None:
+        stop_loss_price = round(price_at_signal * (1.0 - PAPER_STOP_LOSS_PCT), 4)
+        first_trim_price = round(price_at_signal * (1.0 + PAPER_FIRST_TRIM_PCT), 4)
+    else:
+        stop_loss_price = None
+        first_trim_price = None
+
+    return {
+        "price_at_signal": price_at_signal,
+        "entry_status": entry_status,
+        "entry_reason": entry_reason,
+        "stop_loss_price": stop_loss_price,
+        "first_trim_price": first_trim_price,
+        "max_hold_days": PAPER_MAX_HOLD_DAYS,
+        "trade_rule_version": TRADE_RULE_VERSION,
+    }
+
+
 def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> None:
     """
     Saves ranked rows directly to watchlist_scores.
@@ -544,6 +623,8 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
                 )
 
                 for row in rows:
+                    trade_plan = build_paper_trade_plan(row)
+
                     cur.execute(
                         """
                         INSERT INTO watchlist_scores (
@@ -551,9 +632,16 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
                             ticker,
                             rank,
                             composite,
-                            signals
+                            signals,
+                            price_at_signal,
+                            entry_status,
+                            entry_reason,
+                            stop_loss_price,
+                            first_trim_price,
+                            max_hold_days,
+                            trade_rule_version
                         )
-                        VALUES (%s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         [
                             run_date,
@@ -561,6 +649,13 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
                             row["rank"],
                             float(row["composite"]),
                             Json(row["signals"]),
+                            trade_plan["price_at_signal"],
+                            trade_plan["entry_status"],
+                            trade_plan["entry_reason"],
+                            trade_plan["stop_loss_price"],
+                            trade_plan["first_trim_price"],
+                            trade_plan["max_hold_days"],
+                            trade_plan["trade_rule_version"],
                         ],
                     )
 
@@ -603,6 +698,10 @@ def main() -> None:
             break
 
         row["rank"] = i
+
+        trade_plan = build_paper_trade_plan(row)
+        row.update(trade_plan)
+
         rows.append(row)
 
     if len(rows) < MIN_RANKED_TO_SAVE:
@@ -620,11 +719,14 @@ def main() -> None:
         )
 
         log.info(
-            "%d. %-7s composite %+0.2f | price %.4f | %s",
+            "%d. %-7s composite %+0.2f | price %.4f | %s | stop %s | trim %s | %s",
             row["rank"],
             row["ticker"],
             row["composite"],
             safe_float(row.get("price_at_signal"), 0.0),
+            row.get("entry_status"),
+            row.get("stop_loss_price"),
+            row.get("first_trim_price"),
             signal_text,
         )
 
