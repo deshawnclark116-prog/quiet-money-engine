@@ -5,6 +5,15 @@ Quiet Money Engine — snapshot latest watchlist.
 Copies the latest rows from watchlist_scores into prediction_snapshots so the
 grader can later score 1d / 5d / 20d outcomes.
 
+Also copies paper-trade fields:
+- price_at_signal
+- entry_status
+- entry_reason
+- stop_loss_price
+- first_trim_price
+- max_hold_days
+- trade_rule_version
+
 Important:
 - source/model version is controlled by QME_MODEL_VERSION
 - default model version is quality_heavy_v2
@@ -13,7 +22,6 @@ Important:
 import os
 import json
 import logging
-from datetime import datetime, timezone
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
@@ -75,15 +83,6 @@ def normalize_signals(value):
 
 
 def create_prediction_run(cur, latest_run_date):
-    """
-    Dynamically inserts into prediction_runs based on columns that exist.
-    Expected common columns:
-    - id
-    - run_date
-    - source
-    - notes
-    - created_at
-    """
     run_cols = get_columns(cur, "prediction_runs")
 
     if not run_cols:
@@ -150,7 +149,6 @@ def load_latest_watchlist(cur):
     rank_col = pick_col(watchlist_cols, ["rank", "watchlist_rank"])
     composite_col = pick_col(watchlist_cols, ["composite", "score", "composite_score"])
     signals_col = pick_col(watchlist_cols, ["signals", "signal_values", "signal_json"])
-    price_col = pick_col(watchlist_cols, ["price_at_signal", "price", "last_price", "close"])
 
     if not run_col:
         raise RuntimeError("No usable run/date column found in watchlist_scores")
@@ -202,15 +200,11 @@ def load_latest_watchlist(cur):
             "rank": rank_col,
             "composite": composite_col,
             "signals": signals_col,
-            "price": price_col,
         },
     }
 
 
 def delete_existing_snapshots(cur, latest_run_date):
-    """
-    Keep reruns clean for the same model version and run date.
-    """
     cur.execute(
         """
         DELETE FROM prediction_snapshots
@@ -227,6 +221,12 @@ def delete_existing_snapshots(cur, latest_run_date):
             latest_run_date,
             MODEL_VERSION,
         )
+
+
+def add_if_available(insert_cols, values, snapshot_cols, col_name, value):
+    if col_name in snapshot_cols:
+        insert_cols.append(col_name)
+        values.append(value)
 
 
 def insert_snapshots(cur, run_id, latest_run_date, rows, cols):
@@ -246,42 +246,25 @@ def insert_snapshots(cur, run_id, latest_run_date, rows, cols):
         rank_value = row.get(cols["rank"]) if cols["rank"] else i
         composite_value = row.get(cols["composite"])
         signals_value = normalize_signals(row.get(cols["signals"])) if cols["signals"] else {}
-        price_value = row.get(cols["price"]) if cols["price"] else None
 
         insert_cols = []
         values = []
 
-        if "run_id" in snapshot_cols:
-            insert_cols.append("run_id")
-            values.append(run_id)
+        add_if_available(insert_cols, values, snapshot_cols, "run_id", run_id)
+        add_if_available(insert_cols, values, snapshot_cols, "run_date", latest_run_date)
+        add_if_available(insert_cols, values, snapshot_cols, "ticker", ticker)
+        add_if_available(insert_cols, values, snapshot_cols, "rank", rank_value)
+        add_if_available(insert_cols, values, snapshot_cols, "composite", composite_value)
+        add_if_available(insert_cols, values, snapshot_cols, "signals", Json(signals_value))
+        add_if_available(insert_cols, values, snapshot_cols, "price_at_signal", row.get("price_at_signal"))
+        add_if_available(insert_cols, values, snapshot_cols, "source", MODEL_VERSION)
 
-        if "run_date" in snapshot_cols:
-            insert_cols.append("run_date")
-            values.append(latest_run_date)
-
-        if "ticker" in snapshot_cols:
-            insert_cols.append("ticker")
-            values.append(ticker)
-
-        if "rank" in snapshot_cols:
-            insert_cols.append("rank")
-            values.append(rank_value)
-
-        if "composite" in snapshot_cols:
-            insert_cols.append("composite")
-            values.append(composite_value)
-
-        if "signals" in snapshot_cols:
-            insert_cols.append("signals")
-            values.append(Json(signals_value))
-
-        if "price_at_signal" in snapshot_cols:
-            insert_cols.append("price_at_signal")
-            values.append(price_value)
-
-        if "source" in snapshot_cols:
-            insert_cols.append("source")
-            values.append(MODEL_VERSION)
+        add_if_available(insert_cols, values, snapshot_cols, "entry_status", row.get("entry_status"))
+        add_if_available(insert_cols, values, snapshot_cols, "entry_reason", row.get("entry_reason"))
+        add_if_available(insert_cols, values, snapshot_cols, "stop_loss_price", row.get("stop_loss_price"))
+        add_if_available(insert_cols, values, snapshot_cols, "first_trim_price", row.get("first_trim_price"))
+        add_if_available(insert_cols, values, snapshot_cols, "max_hold_days", row.get("max_hold_days"))
+        add_if_available(insert_cols, values, snapshot_cols, "trade_rule_version", row.get("trade_rule_version"))
 
         if not insert_cols:
             raise RuntimeError("No usable insert columns found for prediction_snapshots")
