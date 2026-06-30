@@ -2,315 +2,251 @@
 """
 Quiet Money Engine — snapshot latest watchlist.
 
-Copies the latest rows from watchlist_scores into prediction_snapshots so the
-grader can later score 1d / 5d / 20d outcomes.
+Purpose:
+Copy the latest watchlist_scores run into prediction_snapshots so future
+grading can evaluate the model.
 
-Also copies paper-trade fields:
-- price_at_signal
-- entry_status
-- entry_reason
-- stop_loss_price
-- first_trim_price
-- max_hold_days
-- trade_rule_version
+This version preserves the new pre-pop gate fields:
 
-Important:
-- source/model version is controlled by QME_MODEL_VERSION
-- default model version is quality_heavy_v2
+- pre_alert_return_1d
+- pre_alert_return_3d
+- pre_alert_return_5d
+- pre_alert_return_10d
+- distance_from_sma20
+- pre_pop_status
+- pre_pop_reason
+- show_on_main
+
+That lets future reports separate:
+- clean pre-pop candidates
+- late/chase rejects
+- already-popped rejects
+- high-risk rejects
+- no-price-context rejects
 """
 
 import os
-import json
-import logging
+from datetime import datetime
+from typing import Any
 
 import psycopg2
 from psycopg2.extras import RealDictCursor, Json
 
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s %(message)s",
-)
-
 DATABASE_URL = os.getenv("DATABASE_URL")
 MODEL_VERSION = os.getenv("QME_MODEL_VERSION", "quality_heavy_v2").strip() or "quality_heavy_v2"
 
 
-def connect():
+def get_conn():
     if not DATABASE_URL:
-        raise RuntimeError("DATABASE_URL env var is required")
+        raise RuntimeError("DATABASE_URL is required")
 
-    logging.info("Connecting to Postgres.")
     return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
 
 
-def get_columns(cur, table_name):
+def table_columns(cur, table_name: str) -> set[str]:
     cur.execute(
         """
         SELECT column_name
         FROM information_schema.columns
         WHERE table_name = %s
-        ORDER BY ordinal_position
         """,
         [table_name],
     )
-    return [row["column_name"] for row in cur.fetchall()]
+    return {r["column_name"] for r in cur.fetchall()}
 
 
-def pick_col(columns, candidates):
-    for c in candidates:
-        if c in columns:
-            return c
-    return None
+def add_if_available(cols: list[str], vals: list[Any], available: set[str], name: str, value: Any) -> None:
+    if name in available:
+        cols.append(name)
+        vals.append(value)
 
 
-def normalize_signals(value):
-    if value is None:
-        return {}
-
-    if isinstance(value, dict):
-        return value
-
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-            if isinstance(parsed, dict):
-                return parsed
-        except Exception:
-            return {}
-
-    return {}
+def latest_watchlist_run(cur):
+    cur.execute(
+        """
+        SELECT MAX(run_date) AS latest_run
+        FROM watchlist_scores
+        """
+    )
+    row = cur.fetchone()
+    return row["latest_run"] if row else None
 
 
-def create_prediction_run(cur, latest_run_date):
-    run_cols = get_columns(cur, "prediction_runs")
+def fetch_watchlist_rows(cur, run_date):
+    cur.execute(
+        """
+        SELECT *
+        FROM watchlist_scores
+        WHERE run_date = %s
+        ORDER BY rank ASC
+        """,
+        [run_date],
+    )
+    return [dict(r) for r in cur.fetchall()]
 
-    if not run_cols:
-        raise RuntimeError("prediction_runs table not found or has no columns")
 
-    insert_cols = []
-    values = []
+def create_prediction_run(cur, run_date, snapshot_count: int):
+    run_cols = table_columns(cur, "prediction_runs")
 
-    if "run_date" in run_cols:
-        insert_cols.append("run_date")
-        values.append(latest_run_date)
+    cols = []
+    vals = []
 
-    if "source" in run_cols:
-        insert_cols.append("source")
-        values.append(MODEL_VERSION)
+    add_if_available(cols, vals, run_cols, "run_date", run_date)
+    add_if_available(cols, vals, run_cols, "source", MODEL_VERSION)
+    add_if_available(cols, vals, run_cols, "model_version", MODEL_VERSION)
+    add_if_available(cols, vals, run_cols, "snapshot_count", snapshot_count)
+    add_if_available(cols, vals, run_cols, "created_at", datetime.utcnow())
 
-    if "model_version" in run_cols:
-        insert_cols.append("model_version")
-        values.append(MODEL_VERSION)
+    if not cols:
+        raise RuntimeError("prediction_runs table has no usable insert columns")
 
-    if "notes" in run_cols:
-        insert_cols.append("notes")
-        values.append(f"Snapshot copied from latest watchlist_scores run using {MODEL_VERSION}.")
+    placeholders = ", ".join(["%s"] * len(vals))
+    col_sql = ", ".join(cols)
 
-    if "description" in run_cols:
-        insert_cols.append("description")
-        values.append(f"Snapshot copied from latest watchlist_scores run using {MODEL_VERSION}.")
-
-    if insert_cols:
-        placeholders = ", ".join(["%s"] * len(insert_cols))
-        col_sql = ", ".join(insert_cols)
-
+    if "id" in run_cols:
         cur.execute(
             f"""
             INSERT INTO prediction_runs ({col_sql})
             VALUES ({placeholders})
             RETURNING id
             """,
-            values,
+            vals,
+        )
+        return cur.fetchone()["id"]
+
+    cur.execute(
+        f"""
+        INSERT INTO prediction_runs ({col_sql})
+        VALUES ({placeholders})
+        """,
+        vals,
+    )
+    return None
+
+
+def delete_existing_snapshots(cur, run_date):
+    snap_cols = table_columns(cur, "prediction_snapshots")
+
+    if "source" in snap_cols:
+        cur.execute(
+            """
+            DELETE FROM prediction_snapshots
+            WHERE run_date = %s
+              AND source = %s
+            """,
+            [run_date, MODEL_VERSION],
+        )
+    elif "model_version" in snap_cols:
+        cur.execute(
+            """
+            DELETE FROM prediction_snapshots
+            WHERE run_date = %s
+              AND model_version = %s
+            """,
+            [run_date, MODEL_VERSION],
         )
     else:
         cur.execute(
             """
-            INSERT INTO prediction_runs DEFAULT VALUES
-            RETURNING id
-            """
-        )
-
-    row = cur.fetchone()
-    run_id = row["id"]
-
-    logging.info("prediction_runs id: %s", run_id)
-    return run_id
-
-
-def load_latest_watchlist(cur):
-    watchlist_cols = get_columns(cur, "watchlist_scores")
-
-    if not watchlist_cols:
-        raise RuntimeError("watchlist_scores table not found or has no columns")
-
-    run_col = pick_col(watchlist_cols, ["run_date", "date", "as_of_date"])
-    ticker_col = pick_col(watchlist_cols, ["ticker", "symbol"])
-    rank_col = pick_col(watchlist_cols, ["rank", "watchlist_rank"])
-    composite_col = pick_col(watchlist_cols, ["composite", "score", "composite_score"])
-    signals_col = pick_col(watchlist_cols, ["signals", "signal_values", "signal_json"])
-
-    if not run_col:
-        raise RuntimeError("No usable run/date column found in watchlist_scores")
-
-    if not ticker_col:
-        raise RuntimeError("No ticker/symbol column found in watchlist_scores")
-
-    if not composite_col:
-        raise RuntimeError("No composite/score column found in watchlist_scores")
-
-    cur.execute(
-        f"""
-        SELECT MAX({run_col}) AS latest_run_date
-        FROM watchlist_scores
-        """
-    )
-
-    latest = cur.fetchone()
-    latest_run_date = latest["latest_run_date"] if latest else None
-
-    if not latest_run_date:
-        raise RuntimeError("No latest run_date found in watchlist_scores")
-
-    logging.info("Latest watchlist run_date: %s", latest_run_date)
-
-    order_sql = f"ORDER BY {rank_col} ASC" if rank_col else f"ORDER BY {composite_col} DESC"
-
-    cur.execute(
-        f"""
-        SELECT *
-        FROM watchlist_scores
-        WHERE {run_col} = %s
-        {order_sql}
-        """,
-        [latest_run_date],
-    )
-
-    rows = [dict(r) for r in cur.fetchall()]
-
-    if not rows:
-        raise RuntimeError(f"No watchlist rows found for latest run_date {latest_run_date}")
-
-    return {
-        "latest_run_date": latest_run_date,
-        "rows": rows,
-        "cols": {
-            "run": run_col,
-            "ticker": ticker_col,
-            "rank": rank_col,
-            "composite": composite_col,
-            "signals": signals_col,
-        },
-    }
-
-
-def delete_existing_snapshots(cur, latest_run_date):
-    cur.execute(
-        """
-        DELETE FROM prediction_snapshots
-        WHERE run_date = %s
-          AND source = %s
-        """,
-        [latest_run_date, MODEL_VERSION],
-    )
-
-    if cur.rowcount:
-        logging.info(
-            "Deleted %s existing prediction snapshots for %s / %s",
-            cur.rowcount,
-            latest_run_date,
-            MODEL_VERSION,
-        )
-
-
-def add_if_available(insert_cols, values, snapshot_cols, col_name, value):
-    if col_name in snapshot_cols:
-        insert_cols.append(col_name)
-        values.append(value)
-
-
-def insert_snapshots(cur, run_id, latest_run_date, rows, cols):
-    snapshot_cols = get_columns(cur, "prediction_snapshots")
-
-    if not snapshot_cols:
-        raise RuntimeError("prediction_snapshots table not found or has no columns")
-
-    inserted = 0
-
-    for i, row in enumerate(rows, 1):
-        ticker = str(row.get(cols["ticker"]) or "").upper().strip()
-
-        if not ticker:
-            continue
-
-        rank_value = row.get(cols["rank"]) if cols["rank"] else i
-        composite_value = row.get(cols["composite"])
-        signals_value = normalize_signals(row.get(cols["signals"])) if cols["signals"] else {}
-
-        insert_cols = []
-        values = []
-
-        add_if_available(insert_cols, values, snapshot_cols, "run_id", run_id)
-        add_if_available(insert_cols, values, snapshot_cols, "run_date", latest_run_date)
-        add_if_available(insert_cols, values, snapshot_cols, "ticker", ticker)
-        add_if_available(insert_cols, values, snapshot_cols, "rank", rank_value)
-        add_if_available(insert_cols, values, snapshot_cols, "composite", composite_value)
-        add_if_available(insert_cols, values, snapshot_cols, "signals", Json(signals_value))
-        add_if_available(insert_cols, values, snapshot_cols, "price_at_signal", row.get("price_at_signal"))
-        add_if_available(insert_cols, values, snapshot_cols, "source", MODEL_VERSION)
-
-        add_if_available(insert_cols, values, snapshot_cols, "entry_status", row.get("entry_status"))
-        add_if_available(insert_cols, values, snapshot_cols, "entry_reason", row.get("entry_reason"))
-        add_if_available(insert_cols, values, snapshot_cols, "stop_loss_price", row.get("stop_loss_price"))
-        add_if_available(insert_cols, values, snapshot_cols, "first_trim_price", row.get("first_trim_price"))
-        add_if_available(insert_cols, values, snapshot_cols, "max_hold_days", row.get("max_hold_days"))
-        add_if_available(insert_cols, values, snapshot_cols, "trade_rule_version", row.get("trade_rule_version"))
-
-        if not insert_cols:
-            raise RuntimeError("No usable insert columns found for prediction_snapshots")
-
-        placeholders = ", ".join(["%s"] * len(insert_cols))
-        col_sql = ", ".join(insert_cols)
-
-        cur.execute(
-            f"""
-            INSERT INTO prediction_snapshots ({col_sql})
-            VALUES ({placeholders})
+            DELETE FROM prediction_snapshots
+            WHERE run_date = %s
             """,
-            values,
+            [run_date],
         )
 
-        inserted += 1
+    return cur.rowcount
 
-    logging.info("Saved %s prediction snapshots for %s as %s", inserted, latest_run_date, MODEL_VERSION)
-    return inserted
+
+def insert_snapshot(cur, snap_cols: set[str], run_id, row: dict):
+    cols = []
+    vals = []
+
+    add_if_available(cols, vals, snap_cols, "run_id", run_id)
+    add_if_available(cols, vals, snap_cols, "run_date", row.get("run_date"))
+    add_if_available(cols, vals, snap_cols, "source", MODEL_VERSION)
+    add_if_available(cols, vals, snap_cols, "model_version", MODEL_VERSION)
+
+    add_if_available(cols, vals, snap_cols, "ticker", row.get("ticker"))
+    add_if_available(cols, vals, snap_cols, "rank", row.get("rank"))
+    add_if_available(cols, vals, snap_cols, "composite", row.get("composite"))
+
+    signals = row.get("signals")
+    add_if_available(cols, vals, snap_cols, "signals", Json(signals) if isinstance(signals, dict) else signals)
+
+    add_if_available(cols, vals, snap_cols, "price_at_signal", row.get("price_at_signal"))
+
+    # Paper-trade fields.
+    add_if_available(cols, vals, snap_cols, "entry_status", row.get("entry_status"))
+    add_if_available(cols, vals, snap_cols, "entry_reason", row.get("entry_reason"))
+    add_if_available(cols, vals, snap_cols, "stop_loss_price", row.get("stop_loss_price"))
+    add_if_available(cols, vals, snap_cols, "first_trim_price", row.get("first_trim_price"))
+    add_if_available(cols, vals, snap_cols, "max_hold_days", row.get("max_hold_days"))
+    add_if_available(cols, vals, snap_cols, "trade_rule_version", row.get("trade_rule_version"))
+
+    # Pre-pop gate fields.
+    add_if_available(cols, vals, snap_cols, "pre_alert_return_1d", row.get("pre_alert_return_1d"))
+    add_if_available(cols, vals, snap_cols, "pre_alert_return_3d", row.get("pre_alert_return_3d"))
+    add_if_available(cols, vals, snap_cols, "pre_alert_return_5d", row.get("pre_alert_return_5d"))
+    add_if_available(cols, vals, snap_cols, "pre_alert_return_10d", row.get("pre_alert_return_10d"))
+    add_if_available(cols, vals, snap_cols, "distance_from_sma20", row.get("distance_from_sma20"))
+    add_if_available(cols, vals, snap_cols, "pre_pop_status", row.get("pre_pop_status"))
+    add_if_available(cols, vals, snap_cols, "pre_pop_reason", row.get("pre_pop_reason"))
+    add_if_available(cols, vals, snap_cols, "show_on_main", row.get("show_on_main"))
+
+    add_if_available(cols, vals, snap_cols, "created_at", datetime.utcnow())
+
+    if not cols:
+        raise RuntimeError("prediction_snapshots table has no usable insert columns")
+
+    placeholders = ", ".join(["%s"] * len(vals))
+    col_sql = ", ".join(cols)
+
+    cur.execute(
+        f"""
+        INSERT INTO prediction_snapshots ({col_sql})
+        VALUES ({placeholders})
+        """,
+        vals,
+    )
 
 
 def main():
-    logging.info("MODEL_VERSION: %s", MODEL_VERSION)
+    print("MODEL_VERSION:", MODEL_VERSION)
 
-    conn = connect()
+    conn = get_conn()
 
     try:
         with conn:
             with conn.cursor() as cur:
-                latest = load_latest_watchlist(cur)
-                latest_run_date = latest["latest_run_date"]
+                run_date = latest_watchlist_run(cur)
 
-                run_id = create_prediction_run(cur, latest_run_date)
+                if not run_date:
+                    raise RuntimeError("No watchlist_scores rows found")
 
-                delete_existing_snapshots(cur, latest_run_date)
+                rows = fetch_watchlist_rows(cur, run_date)
 
-                inserted = insert_snapshots(
-                    cur=cur,
-                    run_id=run_id,
-                    latest_run_date=latest_run_date,
-                    rows=latest["rows"],
-                    cols=latest["cols"],
-                )
+                if not rows:
+                    raise RuntimeError(f"No watchlist rows found for run_date={run_date}")
 
-                if inserted <= 0:
-                    raise RuntimeError("No prediction snapshots were inserted")
+                deleted = delete_existing_snapshots(cur, run_date)
+                print(f"Deleted {deleted} existing prediction snapshots for {run_date} / {MODEL_VERSION}")
+
+                run_id = create_prediction_run(cur, run_date, len(rows))
+                snap_cols = table_columns(cur, "prediction_snapshots")
+
+                saved = 0
+
+                for row in rows:
+                    insert_snapshot(cur, snap_cols, run_id, row)
+                    saved += 1
+
+                shown = sum(1 for r in rows if r.get("show_on_main") is True)
+                hidden = sum(1 for r in rows if r.get("show_on_main") is False)
+
+                print(f"Saved {saved} prediction snapshots for {run_date} as {MODEL_VERSION}")
+                print(f"Copied main actionable snapshots: {shown}")
+                print(f"Copied hidden diagnostic snapshots: {hidden}")
 
     finally:
         conn.close()
