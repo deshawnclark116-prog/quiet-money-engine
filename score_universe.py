@@ -2,32 +2,20 @@
 """
 Quiet Money Engine — universe scorer.
 
-Builds a ticker universe, fetches price history, applies tradeability gates,
-scores each ticker, adds company/news insight, classifies paper-trade status,
-and saves the ranked watchlist.
+Mission:
+Find quiet / early stocks before the major repricing move happens.
 
-Current stock-side engine:
-- momentum_12_1
-- insider_buy_score
-- volume_pressure_score
-- capital_efficiency_score
-- relative_strength_score
-- filing_catalyst_score
-- company_quality_score
-- news_catalyst_score
-- dilution_risk_score
-- reverse_split_risk_score
+Production architecture after research:
+1. Keep the live scoring profile for ranking strength.
+2. Add a pre-pop timing gate.
+3. Save every ranked name for diagnostics/grading.
+4. Hide late/chase/high-risk names from the main actionable dashboard.
 
-Paper-trade fields saved:
-- price_at_signal
-- entry_status
-- entry_reason
-- stop_loss_price
-- first_trim_price
-- max_hold_days
-- trade_rule_version
-
-Options are parked for later.
+This version fixes the current production flaw where:
+- price_at_signal exists
+- entry_status exists
+- but pre_pop_status / pre-alert returns are NULL
+- and show_on_main defaults everything through
 """
 
 import os
@@ -74,10 +62,13 @@ MIN_DOLLAR_VOLUME = float(os.getenv("MIN_DOLLAR_VOLUME", "250000"))
 INSIDER_LOOKBACK_DAYS = int(os.getenv("INSIDER_LOOKBACK_DAYS", "30"))
 PRICE_HISTORY_DAYS = int(os.getenv("PRICE_HISTORY_DAYS", "400"))
 
-TRADE_RULE_VERSION = os.getenv("QME_TRADE_RULE_VERSION", "paper_entry_v1")
+TRADE_RULE_VERSION = os.getenv("QME_TRADE_RULE_VERSION", "paper_entry_v3_prepop_gate_core")
 PAPER_MAX_HOLD_DAYS = int(os.getenv("PAPER_MAX_HOLD_DAYS", "20"))
 PAPER_STOP_LOSS_PCT = float(os.getenv("PAPER_STOP_LOSS_PCT", "0.07"))
 PAPER_FIRST_TRIM_PCT = float(os.getenv("PAPER_FIRST_TRIM_PCT", "0.10"))
+
+# Research Lab v2 selected core + live_active as the first production move.
+PREPOP_GATE_MODE = os.getenv("PREPOP_GATE_MODE", "core").strip().lower()
 
 ENABLE_COMPANY_INSIGHTS = os.getenv("ENABLE_COMPANY_INSIGHTS", "true").lower() in {
     "1",
@@ -133,12 +124,22 @@ DEFAULT_UNIVERSE = [
 ]
 
 
+# Keep live-active ranking profile for now.
+# The research lab showed the gate is the production-ready fix,
+# not replacing the entire scoring system with quiet-base alpha yet.
 DEFAULT_SIGNAL_WEIGHTS = {
     "momentum_12_1": 1.00,
     "insider_buy_score": 0.35,
     "volume_pressure_score": 0.60,
     "capital_efficiency_score": 0.55,
     "relative_strength_score": 0.50,
+
+    # Optional/newer technical signals. These stay low/neutral unless present.
+    "accumulation_quality_score": 0.00,
+    "trend_quality_score": 0.00,
+    "breakout_setup_score": 0.00,
+    "liquidity_quality_score": 0.00,
+    "volatility_control_score": 0.00,
 
     # Company / filing / news insight layer.
     "filing_catalyst_score": 0.35,
@@ -164,6 +165,31 @@ COMPANY_INSIGHT_SCORE_KEYS = [
 ]
 
 
+GATE_LIMITS = {
+    "loose": {
+        "pre_alert_return_1d": 18.0,
+        "pre_alert_return_3d": 30.0,
+        "pre_alert_return_5d": 40.0,
+        "pre_alert_return_10d": 55.0,
+        "distance_from_sma20": 30.0,
+    },
+    "core": {
+        "pre_alert_return_1d": 15.0,
+        "pre_alert_return_3d": 25.0,
+        "pre_alert_return_5d": 35.0,
+        "pre_alert_return_10d": 45.0,
+        "distance_from_sma20": 25.0,
+    },
+    "strict": {
+        "pre_alert_return_1d": 12.0,
+        "pre_alert_return_3d": 20.0,
+        "pre_alert_return_5d": 25.0,
+        "pre_alert_return_10d": 35.0,
+        "distance_from_sma20": 20.0,
+    },
+}
+
+
 def safe_float(value: Any, default: float = 0.0) -> float:
     try:
         if value is None or value == "":
@@ -177,9 +203,35 @@ def clean_ticker(ticker: str) -> str:
     return str(ticker or "").upper().strip()
 
 
+def pct(now: Optional[float], then: Optional[float]) -> Optional[float]:
+    if now is None or then is None:
+        return None
+
+    try:
+        now = float(now)
+        then = float(then)
+    except Exception:
+        return None
+
+    if then <= 0:
+        return None
+
+    return (now / then - 1.0) * 100.0
+
+
+def round_or_none(value: Optional[float], digits: int = 4) -> Optional[float]:
+    if value is None:
+        return None
+
+    try:
+        return round(float(value), digits)
+    except Exception:
+        return None
+
+
 def parse_signal_weights() -> dict:
     """
-    Allows optional env override:
+    Optional env override:
 
     SIGNAL_WEIGHTS_JSON='{"momentum_12_1":1.0,"relative_strength_score":0.5}'
     """
@@ -258,7 +310,6 @@ def avg_dollar_volume(bars: list[dict], window: int = 20) -> float:
         return 0.0
 
     sample = bars[-window:]
-
     values = []
 
     for bar in sample:
@@ -308,6 +359,108 @@ def passes_tradeability_price_gate(ticker: str, bars: list[dict]) -> bool:
         return False
 
     return True
+
+
+def build_pre_pop_timing(bars: list[dict], signal_price: Optional[float]) -> dict:
+    """
+    Measures whether the model caught the stock before the big move.
+
+    If the stock already moved too far before/at the alert, it is hidden from
+    the main dashboard even if the composite score is strong.
+    """
+    closes = []
+
+    for bar in bars or []:
+        c = safe_float(bar.get("close"), 0.0)
+        if c > 0:
+            closes.append(c)
+
+    signal = safe_float(signal_price, 0.0)
+
+    if signal <= 0 or len(closes) < 21:
+        return {
+            "pre_alert_return_1d": None,
+            "pre_alert_return_3d": None,
+            "pre_alert_return_5d": None,
+            "pre_alert_return_10d": None,
+            "distance_from_sma20": None,
+            "pre_pop_status": "NO PRICE CONTEXT",
+            "pre_pop_reason": "Not enough reliable price history to decide whether the alert was early.",
+            "show_on_main": False,
+        }
+
+    c1 = closes[-2] if len(closes) >= 2 else None
+    c3 = closes[-4] if len(closes) >= 4 else None
+    c5 = closes[-6] if len(closes) >= 6 else None
+    c10 = closes[-11] if len(closes) >= 11 else None
+
+    sma20_values = closes[-20:]
+    sma20 = sum(sma20_values) / len(sma20_values) if sma20_values else None
+
+    r1 = pct(signal, c1)
+    r3 = pct(signal, c3)
+    r5 = pct(signal, c5)
+    r10 = pct(signal, c10)
+    vs20 = pct(signal, sma20)
+
+    out = {
+        "pre_alert_return_1d": round_or_none(r1),
+        "pre_alert_return_3d": round_or_none(r3),
+        "pre_alert_return_5d": round_or_none(r5),
+        "pre_alert_return_10d": round_or_none(r10),
+        "distance_from_sma20": round_or_none(vs20),
+    }
+
+    # Hard reject: the move already happened.
+    if (
+        (r1 is not None and r1 > 30.0)
+        or (r5 is not None and r5 > 60.0)
+        or (r10 is not None and r10 > 80.0)
+        or (vs20 is not None and vs20 > 45.0)
+    ):
+        out.update(
+            {
+                "pre_pop_status": "ALREADY POPPED",
+                "pre_pop_reason": "The stock already made a major move before the alert. Hidden from the main dashboard.",
+                "show_on_main": False,
+            }
+        )
+        return out
+
+    limits = GATE_LIMITS.get(PREPOP_GATE_MODE, GATE_LIMITS["core"])
+
+    failures = []
+
+    checks = [
+        ("1d", r1, limits["pre_alert_return_1d"]),
+        ("3d", r3, limits["pre_alert_return_3d"]),
+        ("5d", r5, limits["pre_alert_return_5d"]),
+        ("10d", r10, limits["pre_alert_return_10d"]),
+        ("vs_sma20", vs20, limits["distance_from_sma20"]),
+    ]
+
+    for label, value, max_allowed in checks:
+        if value is not None and value > max_allowed:
+            failures.append(f"{label} +{value:.1f}% > +{max_allowed:.1f}%")
+
+    if failures:
+        out.update(
+            {
+                "pre_pop_status": "LATE / HIDE",
+                "pre_pop_reason": "Pre-alert expansion failed the pre-pop gate: " + "; ".join(failures),
+                "show_on_main": False,
+            }
+        )
+        return out
+
+    out.update(
+        {
+            "pre_pop_status": "EARLY / CLEAN",
+            "pre_pop_reason": f"Passed {PREPOP_GATE_MODE} pre-pop gate. Price movement before alert is still controlled.",
+            "show_on_main": True,
+        }
+    )
+    return out
 
 
 def load_recent_insider_buys(tickers: list[str], days: int = 30) -> dict:
@@ -413,7 +566,11 @@ def build_universe_data(tickers: list[str]) -> dict:
 
         log.info("Fetching price history for %s", ticker)
 
-        bars = get_price_history(ticker, days=PRICE_HISTORY_DAYS)
+        try:
+            bars = get_price_history(ticker, days=PRICE_HISTORY_DAYS)
+        except Exception as exc:
+            log.warning("%s price history fetch failed: %s", ticker, exc)
+            continue
 
         if not bars:
             log.warning("No price history for %s; skipping", ticker)
@@ -500,13 +657,20 @@ def score_universe(
             signal_values[name] = value
             composite += value * float(weights.get(name, 0.0))
 
+        price_at_signal = ticker_data.get("price")
+        pre_pop = build_pre_pop_timing(
+            bars=ticker_data.get("bars") or [],
+            signal_price=price_at_signal,
+        )
+
         ranked.append(
             {
                 "ticker": ticker,
                 "composite": composite,
                 "signals": signal_values,
-                "price_at_signal": ticker_data.get("price"),
+                "price_at_signal": price_at_signal,
                 "avg_dollar_volume_20": ticker_data.get("avg_dollar_volume_20"),
+                **pre_pop,
             }
         )
 
@@ -538,9 +702,9 @@ def build_paper_trade_plan(row: dict) -> dict:
     """
     Converts a ranked model row into a paper-trade status.
 
-    This does not mean "buy immediately."
-    BUY CANDIDATE means it passed the watchlist-level filter and still needs
-    next-session entry confirmation.
+    PRE-POP BUY CANDIDATE does not mean "buy immediately."
+    It means the stock passed the pre-pop gate and still needs next-session
+    entry confirmation.
     """
     signals = row.get("signals") or {}
 
@@ -555,30 +719,38 @@ def build_paper_trade_plan(row: dict) -> dict:
 
     dilution_risk = safe_float(signals.get("dilution_risk_score"), 0.0)
     reverse_split_risk = safe_float(signals.get("reverse_split_risk_score"), 0.0)
-    liquidity_quality = safe_float(signals.get("liquidity_quality_score"), 0.0)
-    volatility_control = safe_float(signals.get("volatility_control_score"), 0.0)
+    pre_pop_status = str(row.get("pre_pop_status") or "NO PRICE CONTEXT")
 
+    show_on_main = bool(row.get("show_on_main"))
     major_risk = dilution_risk <= -1.50 or reverse_split_risk <= -1.50
 
     if price_at_signal is None:
-        entry_status = "WATCH ONLY"
-        entry_reason = "No valid signal price was available, so paper-entry levels could not be calculated."
+        entry_status = "HIDDEN / NO PRICE"
+        entry_reason = "No valid signal price was available, so this alert is hidden from the actionable dashboard."
+        show_on_main = False
     elif major_risk:
-        entry_status = "SKIP / HIGH RISK"
-        entry_reason = "Major dilution or reverse-split risk flag. Do not paper-buy unless risk is manually cleared."
-    elif rank_value <= 10 and composite > 0 and liquidity_quality >= 1.00 and volatility_control >= 0.50:
-        entry_status = "BUY CANDIDATE"
+        entry_status = "HIDDEN / HIGH RISK"
+        entry_reason = "Major dilution or reverse-split risk flag. Hidden from the actionable dashboard."
+        show_on_main = False
+    elif not show_on_main:
+        entry_status = f"HIDDEN / {pre_pop_status}"
+        entry_reason = row.get("pre_pop_reason") or "Hidden because it failed the pre-pop mission gate."
+        show_on_main = False
+    elif rank_value <= 10 and composite > 0:
+        entry_status = "PRE-POP BUY CANDIDATE"
         entry_reason = (
-            "Top-10 quality setup with acceptable liquidity and volatility profile. "
-            "Paper entry only if next-session open is between -2% and +5% from signal price "
-            "and price holds above the morning low after the first 15–30 minutes."
+            "Passed the pre-pop timing gate and ranked high after scoring. "
+            "Paper entry still requires next-session confirmation."
         )
-    elif rank_value <= 15:
-        entry_status = "WATCH ONLY"
-        entry_reason = "Ranked setup, but not clean enough for automatic paper-buy status."
+        show_on_main = True
+    elif rank_value <= 20:
+        entry_status = "WATCH FOR ENTRY"
+        entry_reason = "Passed the pre-pop timing gate, but is not a top-priority paper-buy candidate yet."
+        show_on_main = True
     else:
-        entry_status = "WATCH ONLY"
-        entry_reason = "Outside the top-15 priority zone."
+        entry_status = "WATCH FOR ENTRY"
+        entry_reason = "Passed the pre-pop timing gate, but ranked outside the main priority zone."
+        show_on_main = True
 
     if price_at_signal is not None:
         stop_loss_price = round(price_at_signal * (1.0 - PAPER_STOP_LOSS_PCT), 4)
@@ -595,6 +767,7 @@ def build_paper_trade_plan(row: dict) -> dict:
         "first_trim_price": first_trim_price,
         "max_hold_days": PAPER_MAX_HOLD_DAYS,
         "trade_rule_version": TRADE_RULE_VERSION,
+        "show_on_main": show_on_main,
     }
 
 
@@ -639,9 +812,17 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
                             stop_loss_price,
                             first_trim_price,
                             max_hold_days,
-                            trade_rule_version
+                            trade_rule_version,
+                            pre_alert_return_1d,
+                            pre_alert_return_3d,
+                            pre_alert_return_5d,
+                            pre_alert_return_10d,
+                            distance_from_sma20,
+                            pre_pop_status,
+                            pre_pop_reason,
+                            show_on_main
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """,
                         [
                             run_date,
@@ -656,6 +837,14 @@ def save_watchlist_rows(rows: list[dict], run_date: Optional[str] = None) -> Non
                             trade_plan["first_trim_price"],
                             trade_plan["max_hold_days"],
                             trade_plan["trade_rule_version"],
+                            row.get("pre_alert_return_1d"),
+                            row.get("pre_alert_return_3d"),
+                            row.get("pre_alert_return_5d"),
+                            row.get("pre_alert_return_10d"),
+                            row.get("distance_from_sma20"),
+                            row.get("pre_pop_status"),
+                            row.get("pre_pop_reason"),
+                            trade_plan["show_on_main"],
                         ],
                     )
 
@@ -677,6 +866,7 @@ def main() -> None:
         ", ".join(SIGNALS),
     )
     log.info("Signal weights: %s", weights)
+    log.info("Pre-pop gate mode: %s", PREPOP_GATE_MODE)
     log.info(
         "Company/news insights enabled=%s top_n=%d",
         ENABLE_COMPANY_INSIGHTS,
@@ -691,18 +881,28 @@ def main() -> None:
 
     ranked = score_universe(data, SIGNALS, weights=weights)
 
-    rows = []
-
+    # Build plans for all scored rows first.
     for i, row in enumerate(ranked, 1):
-        if i > MAX_UNIVERSE_SIZE:
-            break
-
         row["rank"] = i
-
         trade_plan = build_paper_trade_plan(row)
         row.update(trade_plan)
 
-        rows.append(row)
+    # Production architecture:
+    # actionable early/clean candidates first,
+    # hidden diagnostics fill remaining saved rows.
+    actionable = [row for row in ranked if row.get("show_on_main")]
+    hidden = [row for row in ranked if not row.get("show_on_main")]
+
+    rows = actionable[:MAX_UNIVERSE_SIZE]
+
+    if len(rows) < MAX_UNIVERSE_SIZE:
+        rows.extend(hidden[: MAX_UNIVERSE_SIZE - len(rows)])
+
+    # Re-rank final saved rows so frontend rank is actionable-first.
+    for i, row in enumerate(rows, 1):
+        row["rank"] = i
+        trade_plan = build_paper_trade_plan(row)
+        row.update(trade_plan)
 
     if len(rows) < MIN_RANKED_TO_SAVE:
         log.error(
@@ -712,6 +912,8 @@ def main() -> None:
         )
         raise SystemExit(1)
 
+    actionable_count = sum(1 for row in rows if row.get("show_on_main"))
+
     for row in rows:
         signal_text = ", ".join(
             f"{name}={value:+.2f}"
@@ -719,16 +921,24 @@ def main() -> None:
         )
 
         log.info(
-            "%d. %-7s composite %+0.2f | price %.4f | %s | stop %s | trim %s | %s",
+            "%d. %-7s composite %+0.2f | price %.4f | %s | prepop=%s | 1d=%s 5d=%s 10d=%s vs20=%s | main=%s | stop %s | trim %s | %s",
             row["rank"],
             row["ticker"],
             row["composite"],
             safe_float(row.get("price_at_signal"), 0.0),
             row.get("entry_status"),
+            row.get("pre_pop_status"),
+            row.get("pre_alert_return_1d"),
+            row.get("pre_alert_return_5d"),
+            row.get("pre_alert_return_10d"),
+            row.get("distance_from_sma20"),
+            row.get("show_on_main"),
             row.get("stop_loss_price"),
             row.get("first_trim_price"),
             signal_text,
         )
+
+    log.info("Actionable main-dashboard names: %d of %d", actionable_count, len(rows))
 
     save_watchlist_rows(rows)
 
