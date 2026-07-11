@@ -46,8 +46,6 @@ VOL_RATIO_FULL = float(os.getenv("QME_WAKE_VOL_RATIO_FULL", "2.5"))
 ACCUM_BARS = int(os.getenv("QME_WAKE_ACCUM_BARS", "20"))
 ACCUM_RATIO_FULL = float(os.getenv("QME_WAKE_ACCUM_RATIO_FULL", "3.0"))
 
-BASE_LOOKBACK_BARS = int(os.getenv("QME_WAKE_BASE_LOOKBACK_BARS", "60"))
-BASE_EXCLUDE_BARS = int(os.getenv("QME_WAKE_BASE_EXCLUDE_BARS", "5"))
 
 API_URL = os.getenv(
     "QME_WATCHLIST_API",
@@ -181,32 +179,59 @@ def score_trend_turn(closes):
     return points, detail
 
 
-def score_at_the_door(closes, highs):
-    end = len(highs) - BASE_EXCLUDE_BARS
-    start = max(0, end - BASE_LOOKBACK_BARS)
+def score_still_early(closes):
+    """The mission is to enter near the bottom of the base and ride the
+    whole move — NOT to buy at the breakout door. Full credit for price
+    still within ~15% of a CONFIRMED low, fading to zero as the name gets
+    60-70% away. A very fresh low earns reduced credit: the literal bottom
+    is only knowable in hindsight, so we require the low to have held for
+    a while (falling-knife protection) before calling it a bottom."""
+    window = closes[-252:] if len(closes) >= 252 else closes
 
-    if end <= start:
+    if not window:
         return 0.0, None
 
-    base_high = max(highs[start:end])
-    if base_high <= 0:
+    low = min(window)
+    if low <= 0:
         return 0.0, None
 
-    dist = pct(closes[-1], base_high)
+    low_pos = max(i for i, c in enumerate(window) if c == low)
+    bars_since_low = len(window) - 1 - low_pos
 
-    # knocking on the base top or just through it
-    if -3.0 <= dist <= 8.0:
+    from_low = pct(closes[-1], low)
+    if from_low is None:
+        return 0.0, None
+
+    if from_low <= 15.0:
         points = 25.0
-    elif -8.0 <= dist < -3.0:
-        points = 15.0
-    elif -15.0 <= dist < -8.0:
-        points = 8.0
-    elif dist > 8.0:
-        points = 10.0  # broke out a while ago; less fresh, some credit
+    elif from_low <= 40.0:
+        points = 25.0 - (from_low - 15.0) / 25.0 * 13.0   # 25 -> 12
+    elif from_low <= 70.0:
+        points = 12.0 - (from_low - 40.0) / 30.0 * 8.0    # 12 -> 4
     else:
         points = 0.0
 
-    return points, dist
+    # Bottom-confirmation structure: a low set only days ago may not be
+    # the bottom at all.
+    if bars_since_low < 20:
+        points *= 0.3
+    elif bars_since_low < 40:
+        points *= 0.6
+
+    return points, {"from_low": from_low, "bars_since_low": bars_since_low}
+
+
+def already_moved_penalty(closes):
+    """Up more than 40% in 90 bars means the pop partially happened.
+    Deduct up to 10 points — the mission does not chase recent runners."""
+    if len(closes) <= 90:
+        return 0.0, None
+
+    r90 = pct(closes[-1], closes[-91])
+    if r90 is None or r90 <= 40.0:
+        return 0.0, r90
+
+    return clamp((r90 - 40.0) / 20.0, 0.0, 1.0) * 10.0, r90
 
 
 def score_bars(closes, highs, vols):
@@ -215,9 +240,10 @@ def score_bars(closes, highs, vols):
     vol_pts, vol_ratio = score_volume_awakening(vols)
     acc_pts, acc_ratio = score_smart_accumulation(closes, vols)
     trend_pts, trend_detail = score_trend_turn(closes)
-    door_pts, door_dist = score_at_the_door(closes, highs)
+    early_pts, early_detail = score_still_early(closes)
+    moved_penalty, r90 = already_moved_penalty(closes)
 
-    total = vol_pts + acc_pts + trend_pts + door_pts
+    total = max(0.0, vol_pts + acc_pts + trend_pts + early_pts - moved_penalty)
 
     r20 = trend_detail.get("r20")
     sma20_rising = trend_detail.get("sma20_rising")
@@ -244,8 +270,13 @@ def score_bars(closes, highs, vols):
             f"{'above' if trend_detail.get('above_sma20') else 'below'} 20d avg "
             f"({'rising' if sma20_rising else 'flat/falling'})"
         )
-    if door_dist is not None:
-        parts.append(f"{door_dist:+.1f}% vs top of its 60d base")
+    if early_detail is not None:
+        parts.append(
+            f"{early_detail['from_low']:+.1f}% off its 12m low "
+            f"(set {early_detail['bars_since_low']} bars ago)"
+        )
+    if moved_penalty > 0 and r90 is not None:
+        parts.append(f"already ran {r90:+.1f}% in 90d (-{moved_penalty:.0f} pts)")
 
     return {
         "ok": True,
@@ -254,7 +285,8 @@ def score_bars(closes, highs, vols):
             "volume_awakening": round(vol_pts, 1),
             "smart_accumulation": round(acc_pts, 1),
             "trend_turn": round(trend_pts, 1),
-            "at_the_door": round(door_pts, 1),
+            "still_early": round(early_pts, 1),
+            "already_moved_penalty": round(-moved_penalty, 1),
         },
         "wake_up_score": round(total, 1),
         "status": status,
@@ -325,7 +357,7 @@ def main():
     scored.sort(key=lambda r: -r["wake_up_score"])
 
     print(f"{'#':<3} {'ticker':<7} {'price':>8} {'score':>6} {'status':<9} "
-          f"{'vol':>5} {'accum':>5} {'trend':>5} {'door':>5}")
+          f"{'vol':>5} {'accum':>5} {'trend':>5} {'early':>5} {'moved':>6}")
     print("-" * 108)
 
     for i, r in enumerate(scored, 1):
@@ -333,7 +365,8 @@ def main():
         print(f"{i:<3} {r['ticker']:<7} {r['price']:>8.2f} "
               f"{r['wake_up_score']:>6.1f} {r['status']:<9} "
               f"{c['volume_awakening']:>5.1f} {c['smart_accumulation']:>5.1f} "
-              f"{c['trend_turn']:>5.1f} {c['at_the_door']:>5.1f}")
+              f"{c['trend_turn']:>5.1f} {c['still_early']:>5.1f} "
+              f"{c['already_moved_penalty']:>6.1f}")
 
     print()
     for r in scored:

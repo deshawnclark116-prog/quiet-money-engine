@@ -70,8 +70,8 @@ def blend(wake_result, shape_result):
 
 
 def evaluate(ticker):
-    """Return (blended_score, entry_reason) or (None, None) when the
-    ticker cannot be scored."""
+    """Fallback path (legacy rows without stored conviction): refetch and
+    score. Return (blended_score, entry_reason) or (None, None)."""
     wake = wake_audit_ticker(ticker)
 
     if not wake.get("ok"):
@@ -93,6 +93,51 @@ def evaluate(ticker):
     return blended, reason
 
 
+def evaluate_from_signals(signals):
+    """Primary path: read the conviction score_universe already computed
+    and stored in the signals JSON for this run. Returns (None, None) when
+    the fields are absent (legacy mode / older rows) so the caller can
+    fall back to a fresh fetch."""
+    import json
+
+    if isinstance(signals, str):
+        try:
+            signals = json.loads(signals)
+        except Exception:
+            return None, None
+
+    if not isinstance(signals, dict) or "conviction" not in signals:
+        return None, None
+
+    def f(key, default=0.0):
+        try:
+            return float(signals.get(key, default))
+        except (TypeError, ValueError):
+            return default
+
+    conviction = f("conviction")
+    wake = f("wake_up_score")
+    quiet_money = f("absorption_score") + f("insider_cluster_score")
+    status = str(signals.get("wake_status") or "")
+    shape = str(signals.get("chart_shape") or "")
+
+    parts = [
+        f"Conviction {conviction:.0f} = wake {wake:.0f}"
+        + (f" ({status})" if status else "")
+        + f" + quiet money {quiet_money:.0f}"
+        + (f" (chart: {shape})" if shape else "")
+    ]
+
+    wake_note = str(signals.get("wake_note") or "")
+    qm_note = str(signals.get("quiet_money_note") or "")
+    if wake_note:
+        parts.append(wake_note)
+    if qm_note:
+        parts.append(qm_note)
+
+    return conviction, ". ".join(parts)
+
+
 def main():
     con = psycopg2.connect(os.getenv("DATABASE_URL"), cursor_factory=RealDictCursor)
 
@@ -103,7 +148,7 @@ def main():
 
             cur.execute(
                 """
-                SELECT id, ticker, rank
+                SELECT id, ticker, rank, signals
                 FROM watchlist_scores
                 WHERE run_date = %s
                   AND show_on_main = TRUE
@@ -123,11 +168,14 @@ def main():
 
             scored = []
             for row in rows:
-                try:
-                    blended, reason = evaluate(row["ticker"])
-                except Exception as exc:
-                    print(f"{row['ticker']} -> scoring error, keeping position: {exc}")
-                    blended, reason = None, None
+                blended, reason = evaluate_from_signals(row.get("signals"))
+
+                if blended is None:
+                    try:
+                        blended, reason = evaluate(row["ticker"])
+                    except Exception as exc:
+                        print(f"{row['ticker']} -> scoring error, keeping position: {exc}")
+                        blended, reason = None, None
 
                 scored.append({**row, "blended": blended, "reason": reason})
 

@@ -38,6 +38,11 @@ from chart_shape_audit import (
     compute_features as chart_shape_features,
 )
 from wake_up_audit import STATUS_COOLING, score_bars as wake_score_bars
+from quiet_money_signals import (
+    absorption_score,
+    describe_quiet_money,
+    insider_cluster_score,
+)
 
 try:
     from universe_builder import build_dynamic_universe
@@ -657,14 +662,19 @@ def get_company_insight_scores(ticker: str, price: Optional[float] = None) -> di
         return neutral
 
 
-def apply_discovery_brain(row: dict, bars: list) -> None:
+def apply_discovery_brain(row: dict, bars: list, insider_buys: list = None) -> None:
     """
     New-brain discovery fields, stored inside the signals JSON so they
     persist to watchlist_scores and snapshots with no schema change:
 
       chart_shape       shape label from chart_shape_audit
       wake_up_score     0-100 timing evidence from wake_up_audit
+      wake_status       FIRING / WARMING / COILED / SLEEPING / COOLING
       wake_blended      wake + Tier 1 chart bonus - cooling penalty
+      absorption_score  0-25 quiet accumulation days (volume w/o price)
+      insider_cluster_score 0-30 open-market insider cluster evidence
+      conviction        wake_blended + absorption + insider cluster
+      quiet_money_note  plain-English evidence summary
       mission_eligible  1.0 when price band + liquidity + Tier 1/2 shape
 
     Fails open: on any error the row keeps neutral values and is simply
@@ -676,6 +686,9 @@ def apply_discovery_brain(row: dict, bars: list) -> None:
 
     signals.setdefault("wake_up_score", 0.0)
     signals.setdefault("wake_blended", 0.0)
+    signals.setdefault("absorption_score", 0.0)
+    signals.setdefault("insider_cluster_score", 0.0)
+    signals.setdefault("conviction", 0.0)
     signals.setdefault("mission_eligible", 0.0)
 
     try:
@@ -715,9 +728,23 @@ def apply_discovery_brain(row: dict, bars: list) -> None:
             blended -= DISCOVERY_COOLING_PENALTY
 
         signals["wake_up_score"] = wake_score
+        signals["wake_status"] = str(wake.get("status") or "")
+        signals["wake_note"] = str(wake.get("reason") or "")
         signals["wake_blended"] = blended
 
         price = safe_float(row.get("price_at_signal"), 0.0)
+
+        # Quiet-money layers: who is positioning, not just how price moves.
+        abs_pts, abs_detail = absorption_score(closes, vols)
+        clu_pts, clu_detail = insider_cluster_score(insider_buys or [], price)
+
+        signals["absorption_score"] = abs_pts
+        signals["insider_cluster_score"] = clu_pts
+        signals["conviction"] = blended + abs_pts + clu_pts
+        signals["quiet_money_note"] = describe_quiet_money(
+            abs_pts, abs_detail, clu_pts, clu_detail
+        )
+
         dollar_vol = safe_float(row.get("avg_dollar_volume_20"), 0.0)
 
         eligible = (
@@ -774,7 +801,11 @@ def score_universe(
         }
 
         if DISCOVERY_MODE != "legacy":
-            apply_discovery_brain(row, ticker_data.get("bars") or [])
+            apply_discovery_brain(
+                row,
+                ticker_data.get("bars") or [],
+                ticker_data.get("insider_buys") or [],
+            )
 
         ranked.append(row)
 
@@ -1002,7 +1033,7 @@ def main() -> None:
             return safe_float((row.get("signals") or {}).get(key), 0.0)
 
         mission = [r for r in ranked if _sig(r, "mission_eligible") >= 1.0]
-        mission.sort(key=lambda r: _sig(r, "wake_blended"), reverse=True)
+        mission.sort(key=lambda r: _sig(r, "conviction"), reverse=True)
 
         mission_ids = {id(r) for r in mission}
         rest = [r for r in ranked if id(r) not in mission_ids]
@@ -1013,10 +1044,10 @@ def main() -> None:
 
         log.info(
             "Discovery mode NEW: %d mission-eligible names saved first "
-            "(top wake_blended: %s)",
+            "(top conviction: %s)",
             len(mission),
             ", ".join(
-                f"{r['ticker']}={_sig(r, 'wake_blended'):.1f}" for r in mission[:5]
+                f"{r['ticker']}={_sig(r, 'conviction'):.1f}" for r in mission[:5]
             ) or "none",
         )
     else:
