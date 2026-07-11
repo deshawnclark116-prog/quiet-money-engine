@@ -30,6 +30,14 @@ from psycopg2.extras import RealDictCursor, Json
 from db import init_db
 from data_layer import get_price_history
 from signals import SIGNALS
+from chart_shape_audit import (
+    LABEL_BASE_BUILDING,
+    LABEL_CONTROLLED_BREAKOUT,
+    LABEL_FRESH_BASE,
+    classify as classify_chart_shape,
+    compute_features as chart_shape_features,
+)
+from wake_up_audit import STATUS_COOLING, score_bars as wake_score_bars
 
 try:
     from universe_builder import build_dynamic_universe
@@ -54,6 +62,21 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 MAX_UNIVERSE_SIZE = int(os.getenv("MAX_UNIVERSE_SIZE", "25"))
 MIN_RANKED_TO_SAVE = int(os.getenv("MIN_RANKED_TO_SAVE", "8"))
+
+# Discovery brain: "new" = mission-eligible names (price band, Tier 1/2
+# chart shape, liquid) are saved FIRST ranked by wake-up evidence, so the
+# legacy composite can no longer silently discard them. "legacy" restores
+# the original composite-only selection instantly.
+DISCOVERY_MODE = os.getenv("QME_DISCOVERY_MODE", "new").strip().lower()
+DISCOVERY_MIN_MAIN_PRICE = float(os.getenv("QME_MIN_MAIN_PRICE", "0.25"))
+DISCOVERY_MAX_MAIN_PRICE = float(os.getenv("QME_MAX_MAIN_PRICE", "15.00"))
+DISCOVERY_TIER1_BONUS = float(os.getenv("QME_RANK_TIER1_BONUS", "15"))
+DISCOVERY_COOLING_PENALTY = float(os.getenv("QME_RANK_COOLING_PENALTY", "10"))
+DISCOVERY_TIER12_LABELS = {
+    LABEL_FRESH_BASE,
+    LABEL_CONTROLLED_BREAKOUT,
+    LABEL_BASE_BUILDING,
+}
 
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.10"))
 MAX_PRICE = float(os.getenv("MAX_PRICE", "1000000"))
@@ -634,6 +657,84 @@ def get_company_insight_scores(ticker: str, price: Optional[float] = None) -> di
         return neutral
 
 
+def apply_discovery_brain(row: dict, bars: list) -> None:
+    """
+    New-brain discovery fields, stored inside the signals JSON so they
+    persist to watchlist_scores and snapshots with no schema change:
+
+      chart_shape       shape label from chart_shape_audit
+      wake_up_score     0-100 timing evidence from wake_up_audit
+      wake_blended      wake + Tier 1 chart bonus - cooling penalty
+      mission_eligible  1.0 when price band + liquidity + Tier 1/2 shape
+
+    Fails open: on any error the row keeps neutral values and is simply
+    not boosted, never dropped.
+    """
+    signals = row.get("signals")
+    if signals is None:
+        return
+
+    signals.setdefault("wake_up_score", 0.0)
+    signals.setdefault("wake_blended", 0.0)
+    signals.setdefault("mission_eligible", 0.0)
+
+    try:
+        shape_rows = []
+        closes = []
+        highs = []
+        vols = []
+
+        for b in bars or []:
+            d = str(b.get("date") or "")[:10]
+            c = safe_float(b.get("close"), 0.0)
+            if not d or c is None or c <= 0:
+                continue
+            lo = safe_float(b.get("low"), c) or c
+            hi = safe_float(b.get("high"), c) or c
+            v = safe_float(b.get("volume"), 0.0) or 0.0
+            shape_rows.append((d, c, lo, hi))
+            closes.append(c)
+            highs.append(hi)
+            vols.append(v)
+
+        if len(shape_rows) < 180:
+            return
+
+        label, _confidence, _reason = classify_chart_shape(
+            chart_shape_features(shape_rows)
+        )
+        signals["chart_shape"] = label
+
+        wake = wake_score_bars(closes, highs, vols)
+        wake_score = safe_float(wake.get("wake_up_score"), 0.0)
+
+        blended = wake_score
+        if label in {LABEL_FRESH_BASE, LABEL_CONTROLLED_BREAKOUT}:
+            blended += DISCOVERY_TIER1_BONUS
+        if wake.get("status") == STATUS_COOLING:
+            blended -= DISCOVERY_COOLING_PENALTY
+
+        signals["wake_up_score"] = wake_score
+        signals["wake_blended"] = blended
+
+        price = safe_float(row.get("price_at_signal"), 0.0)
+        dollar_vol = safe_float(row.get("avg_dollar_volume_20"), 0.0)
+
+        eligible = (
+            label in DISCOVERY_TIER12_LABELS
+            and DISCOVERY_MIN_MAIN_PRICE <= price <= DISCOVERY_MAX_MAIN_PRICE
+            and dollar_vol >= MIN_DOLLAR_VOLUME
+        )
+        signals["mission_eligible"] = 1.0 if eligible else 0.0
+
+    except Exception as exc:
+        log.warning(
+            "%s discovery brain failed; no discovery boost: %s",
+            row.get("ticker"),
+            exc,
+        )
+
+
 def score_universe(
     data: dict,
     signals: dict,
@@ -663,16 +764,19 @@ def score_universe(
             signal_price=price_at_signal,
         )
 
-        ranked.append(
-            {
-                "ticker": ticker,
-                "composite": composite,
-                "signals": signal_values,
-                "price_at_signal": price_at_signal,
-                "avg_dollar_volume_20": ticker_data.get("avg_dollar_volume_20"),
-                **pre_pop,
-            }
-        )
+        row = {
+            "ticker": ticker,
+            "composite": composite,
+            "signals": signal_values,
+            "price_at_signal": price_at_signal,
+            "avg_dollar_volume_20": ticker_data.get("avg_dollar_volume_20"),
+            **pre_pop,
+        }
+
+        if DISCOVERY_MODE != "legacy":
+            apply_discovery_brain(row, ticker_data.get("bars") or [])
+
+        ranked.append(row)
 
     ranked.sort(key=lambda row: row["composite"], reverse=True)
 
@@ -888,15 +992,41 @@ def main() -> None:
         row.update(trade_plan)
 
     # Production architecture:
-    # actionable early/clean candidates first,
-    # hidden diagnostics fill remaining saved rows.
-    actionable = [row for row in ranked if row.get("show_on_main")]
-    hidden = [row for row in ranked if not row.get("show_on_main")]
+    # discovery mode "new": mission-eligible names (price band, Tier 1/2
+    # chart shape, liquid) are saved FIRST, ordered by wake-up evidence,
+    # so the legacy composite can no longer silently discard them.
+    # Actionable and hidden composite picks fill the remaining rows.
+    # discovery mode "legacy": original actionable-first selection.
+    if DISCOVERY_MODE != "legacy":
+        def _sig(row, key):
+            return safe_float((row.get("signals") or {}).get(key), 0.0)
 
-    rows = actionable[:MAX_UNIVERSE_SIZE]
+        mission = [r for r in ranked if _sig(r, "mission_eligible") >= 1.0]
+        mission.sort(key=lambda r: _sig(r, "wake_blended"), reverse=True)
 
-    if len(rows) < MAX_UNIVERSE_SIZE:
-        rows.extend(hidden[: MAX_UNIVERSE_SIZE - len(rows)])
+        mission_ids = {id(r) for r in mission}
+        rest = [r for r in ranked if id(r) not in mission_ids]
+        actionable = [r for r in rest if r.get("show_on_main")]
+        hidden = [r for r in rest if not r.get("show_on_main")]
+
+        rows = (mission + actionable + hidden)[:MAX_UNIVERSE_SIZE]
+
+        log.info(
+            "Discovery mode NEW: %d mission-eligible names saved first "
+            "(top wake_blended: %s)",
+            len(mission),
+            ", ".join(
+                f"{r['ticker']}={_sig(r, 'wake_blended'):.1f}" for r in mission[:5]
+            ) or "none",
+        )
+    else:
+        actionable = [row for row in ranked if row.get("show_on_main")]
+        hidden = [row for row in ranked if not row.get("show_on_main")]
+
+        rows = actionable[:MAX_UNIVERSE_SIZE]
+
+        if len(rows) < MAX_UNIVERSE_SIZE:
+            rows.extend(hidden[: MAX_UNIVERSE_SIZE - len(rows)])
 
     # Re-rank final saved rows so frontend rank is actionable-first.
     for i, row in enumerate(rows, 1):
@@ -916,7 +1046,7 @@ def main() -> None:
 
     for row in rows:
         signal_text = ", ".join(
-            f"{name}={value:+.2f}"
+            f"{name}={value:+.2f}" if isinstance(value, (int, float)) else f"{name}={value}"
             for name, value in row["signals"].items()
         )
 
