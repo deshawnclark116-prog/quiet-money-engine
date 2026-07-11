@@ -209,20 +209,9 @@ def score_at_the_door(closes, highs):
     return points, dist
 
 
-def audit_ticker(ticker):
-    rows = normalize_history(ticker)
-
-    if len(rows) < MIN_BARS:
-        return {
-            "ticker": ticker,
-            "ok": False,
-            "reason": f"only {len(rows)} usable bars (< {MIN_BARS})",
-        }
-
-    closes = [x[1] for x in rows]
-    highs = [x[2] for x in rows]
-    vols = [x[3] for x in rows]
-
+def score_bars(closes, highs, vols):
+    """Score already-fetched bars. Used by audit_ticker and by callers
+    that fetch price history once and feed multiple scorers."""
     vol_pts, vol_ratio = score_volume_awakening(vols)
     acc_pts, acc_ratio = score_smart_accumulation(closes, vols)
     trend_pts, trend_detail = score_trend_turn(closes)
@@ -259,9 +248,7 @@ def audit_ticker(ticker):
         parts.append(f"{door_dist:+.1f}% vs top of its 60d base")
 
     return {
-        "ticker": ticker,
         "ok": True,
-        "date": rows[-1][0],
         "price": closes[-1],
         "components": {
             "volume_awakening": round(vol_pts, 1),
@@ -273,6 +260,26 @@ def audit_ticker(ticker):
         "status": status,
         "reason": "; ".join(parts),
     }
+
+
+def audit_ticker(ticker):
+    rows = normalize_history(ticker)
+
+    if len(rows) < MIN_BARS:
+        return {
+            "ticker": ticker,
+            "ok": False,
+            "reason": f"only {len(rows)} usable bars (< {MIN_BARS})",
+        }
+
+    closes = [x[1] for x in rows]
+    highs = [x[2] for x in rows]
+    vols = [x[3] for x in rows]
+
+    result = score_bars(closes, highs, vols)
+    result["ticker"] = ticker
+    result["date"] = rows[-1][0]
+    return result
 
 
 def fetch_board_tickers():
