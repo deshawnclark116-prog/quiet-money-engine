@@ -43,7 +43,7 @@ from quiet_money_signals import (
     describe_quiet_money,
     insider_cluster_score,
 )
-from filing_intelligence import get_filing_events
+from filing_intelligence import get_filing_intel
 
 try:
     from universe_builder import build_dynamic_universe
@@ -744,7 +744,11 @@ def apply_discovery_brain(row: dict, bars: list, insider_buys: list = None) -> N
 
         # Quiet-money layers: who is positioning, not just how price moves.
         abs_pts, abs_detail = absorption_score(closes, vols)
-        clu_pts, clu_detail = insider_cluster_score(insider_buys or [], price)
+        clu_pts, clu_detail = insider_cluster_score(
+            insider_buys or [],
+            price,
+            avg_dollar_volume=safe_float(row.get("avg_dollar_volume_20"), 0.0),
+        )
 
         signals["absorption_score"] = abs_pts
         signals["insider_cluster_score"] = clu_pts
@@ -1030,10 +1034,13 @@ def main() -> None:
         trade_plan = build_paper_trade_plan(row)
         row.update(trade_plan)
 
-    # Filing-event intelligence: leading SEC events (13D stakes, shelf
-    # withdrawals, late-filing notices, 8-K item codes) adjust conviction
-    # for mission-eligible names. Support evidence only — it can never
-    # qualify a stock by itself, and it fails open per ticker.
+    # Filing-event intelligence for mission-eligible names: leading SEC
+    # events (13D stakes, shelf withdrawals, late-filing notices, 8-K item
+    # codes) adjust conviction — support evidence only. The same SEC fetch
+    # supplies the industry (SIC) code, which excludes pooled/yield
+    # vehicles (closed-end funds, REITs, SPACs) as a class: they can pass
+    # every price-shaped gate yet are structurally incapable of a pre-pop
+    # move. Fails open per ticker.
     if DISCOVERY_MODE != "legacy" and FILING_EVENTS_ENABLED:
         for row in ranked:
             sig = row.get("signals") or {}
@@ -1042,10 +1049,35 @@ def main() -> None:
                 continue
 
             try:
-                fe_score, fe_events = get_filing_events(row["ticker"])
+                intel = get_filing_intel(row["ticker"])
             except Exception as exc:
-                log.warning("%s filing events failed: %s", row["ticker"], exc)
+                log.warning("%s filing intel failed: %s", row["ticker"], exc)
                 continue
+
+            if intel.get("sic"):
+                sig["sic"] = intel["sic"]
+
+            if intel.get("is_fund_vehicle"):
+                sig["mission_eligible"] = 0.0
+                row["show_on_main"] = False
+                row["entry_status"] = "WATCH ONLY / FUND VEHICLE"
+                row["pre_pop_status"] = "FUND VEHICLE / NOT PRE-POP"
+                row["pre_pop_reason"] = (
+                    "Registered investment company (Investment Company Act "
+                    "filings on record"
+                    + (f"; SIC {intel['sic']}" if intel.get("sic") else "")
+                    + "): pooled/yield vehicles do not have pre-pop dynamics."
+                )
+                log.info(
+                    "%s excluded as fund vehicle (SIC %s %s)",
+                    row["ticker"],
+                    intel["sic"],
+                    intel.get("sic_description"),
+                )
+                continue
+
+            fe_score = intel["score"]
+            fe_events = intel["events"]
 
             sig["filing_events_score"] = fe_score
             if fe_events:
