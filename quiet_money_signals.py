@@ -88,6 +88,7 @@ def absorption_score(closes, vols):
                 "vol_mult": vols[i] / med,
                 "move_pct": move,
                 "in_lower_half": in_lower_half,
+                "dollars": vols[i] * closes[i],
             }
         )
 
@@ -113,6 +114,7 @@ def absorption_score(closes, vols):
         "biggest_vol_mult": round(biggest["vol_mult"], 1),
         "biggest_move_pct": round(biggest["move_pct"], 2),
         "most_recent_bars_ago": min(d["index_from_end"] for d in days),
+        "absorbed_dollars": round(sum(d["dollars"] for d in days)),
     }
     return points, detail
 
@@ -242,6 +244,30 @@ def insider_cluster_score(buys, current_price, today=None, avg_dollar_volume=Non
         meaning_mult = max(0.2, min(1.0, total_value / (0.25 * liquidity)))
         points *= meaning_mult
 
+    # Per-insider breakdown, biggest wallet first, so the board can say
+    # WHO bought, not just that "insiders" did.
+    who = []
+    for name, rows in by_insider.items():
+        value = sum(float(b.get("value") or 0) for b in rows)
+        sh = sum(
+            float(b["value"]) / float(b["price"])
+            for b in rows
+            if float(b.get("price") or 0) > 0 and float(b.get("value") or 0) > 0
+        )
+        who.append(
+            {
+                "name": str(rows[0].get("insider") or "insider"),
+                "role": str(rows[0].get("role") or "insider"),
+                "value": round(value),
+                "avg_price": round(value / sh, 2) if sh > 0 else None,
+            }
+        )
+    who.sort(key=lambda w: -w["value"])
+
+    entry_drift_pct = None
+    if avg_price and current_price:
+        entry_drift_pct = round(_pct(current_price, avg_price), 1)
+
     detail = {
         "meaning_mult": round(meaning_mult, 2),
         "distinct_insiders": distinct,
@@ -249,33 +275,69 @@ def insider_cluster_score(buys, current_price, today=None, avg_dollar_volume=Non
         "tight_cluster": tight,
         "total_value": round(total_value),
         "avg_buy_price": round(avg_price, 4) if avg_price else None,
+        "entry_drift_pct": entry_drift_pct,
         "newest_days_ago": min(b["_age"] for b in recent),
         "roles": sorted({str(b.get("role") or "insider") for b in recent}),
+        "who": who[:4],
     }
     return points, detail
 
 
+def _money(value):
+    value = float(value or 0)
+    if value >= 1_000_000:
+        return f"${value / 1_000_000:.1f}M"
+    if value >= 1_000:
+        return f"${value / 1_000:.0f}K"
+    return f"${value:.0f}"
+
+
 def describe_quiet_money(absorption, absorption_detail, cluster, cluster_detail):
-    """One plain-English sentence per detector, for entry_reason strings."""
+    """Plain-English evidence for entry_reason strings. Names names and
+    prices the entry: the reader should never have to ask 'who bought,
+    at what price, and how does my entry compare to theirs?'"""
     parts = []
+
+    if cluster_detail:
+        d = cluster_detail
+
+        who_bits = [
+            f"{w['name']} ({w['role']}) {_money(w['value'])}"
+            + (f" @ ${w['avg_price']:.2f}" if w.get("avg_price") else "")
+            for w in d.get("who") or []
+        ]
+
+        text = "Insiders bought open-market: " + "; ".join(who_bits) if who_bits else (
+            f"{d['distinct_insiders']} insider(s) bought "
+            f"{_money(d['total_value'])} open-market in 90d"
+        )
+
+        if d.get("avg_buy_price"):
+            text += f" — {_money(d['total_value'])} total, avg entry ${d['avg_buy_price']:.2f}"
+
+        if d.get("entry_drift_pct") is not None:
+            drift = d["entry_drift_pct"]
+            text += (
+                f"; current price is {drift:+.1f}% vs their entry"
+                + (" (still buyable near their level)" if abs(drift) <= 10 else "")
+            )
+
+        text += f"; newest buy {d['newest_days_ago']}d ago"
+        if d.get("tight_cluster"):
+            text += "; tight cluster (2+ insiders within 2 weeks)"
+
+        parts.append(text)
 
     if absorption_detail and absorption_detail.get("absorption_days"):
         d = absorption_detail
         parts.append(
-            f"{d['absorption_days']} absorption day(s) — up to "
-            f"{d['biggest_vol_mult']}x volume moving price only "
-            f"{d['biggest_move_pct']:+.1f}%"
-            + (f", {d['lower_half_days']} in the lower half of the range"
+            f"{d['absorption_days']} absorption day(s): ~"
+            f"{_money(d.get('absorbed_dollars'))} traded at up to "
+            f"{d['biggest_vol_mult']}x normal volume while price moved only "
+            f"{d['biggest_move_pct']:+.1f}% — supply being eaten quietly"
+            + (f", {d['lower_half_days']} of them near the lows"
                if d.get("lower_half_days") else "")
-        )
-
-    if cluster_detail:
-        d = cluster_detail
-        parts.append(
-            f"{d['distinct_insiders']} insider(s) bought "
-            f"${d['total_value']:,} open-market in 90d"
-            + (" in a tight cluster" if d.get("tight_cluster") else "")
-            + (f" (roles: {', '.join(d['roles'][:3])})" if d.get("roles") else "")
+            + f", most recent {d['most_recent_bars_ago']} bar(s) ago"
         )
 
     return "; ".join(parts) if parts else "no quiet-money evidence yet"
