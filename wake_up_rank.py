@@ -117,7 +117,11 @@ def evaluate_from_signals(signals):
 
     conviction = f("conviction")
     wake = f("wake_up_score")
-    quiet_money = f("absorption_score") + f("insider_cluster_score")
+    quiet_money = (
+        f("absorption_score")
+        + f("insider_cluster_score")
+        + f("filing_events_score")
+    )
     status = str(signals.get("wake_status") or "")
     shape = str(signals.get("chart_shape") or "")
 
@@ -130,10 +134,13 @@ def evaluate_from_signals(signals):
 
     wake_note = str(signals.get("wake_note") or "")
     qm_note = str(signals.get("quiet_money_note") or "")
+    fe_note = str(signals.get("filing_events") or "")
     if wake_note:
         parts.append(wake_note)
     if qm_note:
         parts.append(qm_note)
+    if fe_note:
+        parts.append("Filings: " + fe_note)
 
     return conviction, ". ".join(parts)
 
