@@ -176,9 +176,87 @@ def fetch_recent_filings(ticker, today=None):
         return []
 
 
+# Registered investment companies (closed-end funds, mutual funds) are
+# structurally incapable of a pre-pop move and must be excluded as a
+# class. SIC codes are unreliable for them (often blank), but their
+# Investment Company Act filings are a decisive fingerprint: only funds
+# file N-series forms (N-2, N-CSR, N-PORT, N-14, ...) or fund
+# prospectus updates (485/486BPOS, 24F-2NT). Verified live: KYN, IGR,
+# FINS, FUND all carry N-forms; operating companies never do.
+FUND_VEHICLE_SICS = {"6722", "6726", "6770"}
+FUND_FORM_EXACT = {"24F-2NT", "485BPOS", "486BPOS", "485APOS", "486APOS"}
+
+
+def _looks_like_fund(forms, sic):
+    if sic in FUND_VEHICLE_SICS:
+        return True
+    for f in forms or []:
+        form = str(f).upper().strip()
+        if form.startswith("N-") or form in FUND_FORM_EXACT:
+            return True
+    return False
+
+
+def get_filing_intel(ticker, today=None):
+    """End-to-end: ticker -> {score, events, sic, sic_description,
+    is_fund_vehicle}. One submissions fetch serves both the filing-event
+    classification and the instrument-type check. Fails open (score 0,
+    is_fund_vehicle False)."""
+    out = {
+        "score": 0.0,
+        "events": [],
+        "sic": "",
+        "sic_description": "",
+        "is_fund_vehicle": False,
+    }
+
+    try:
+        from company_insights import fetch_submissions_by_cik10, get_cik_for_ticker
+
+        info = get_cik_for_ticker(ticker)
+        if not info:
+            return out
+
+        submissions = fetch_submissions_by_cik10(info["cik10"]) or {}
+
+        sic = str(submissions.get("sic") or "").strip()
+        out["sic"] = sic
+        out["sic_description"] = str(submissions.get("sicDescription") or "").strip()
+
+        recent = (submissions.get("filings") or {}).get("recent") or {}
+        forms = recent.get("form") or []
+        dates = recent.get("filingDate") or []
+        items = recent.get("items") or []
+
+        # Fund detection scans the FULL recent filing history (years),
+        # not just the 90-day event window.
+        out["is_fund_vehicle"] = _looks_like_fund(forms, sic)
+
+        filings = []
+        for i, form in enumerate(forms):
+            age = _days_ago(dates[i] if i < len(dates) else None, today)
+            if age is None or age > LOOKBACK_DAYS:
+                continue
+            filings.append(
+                {
+                    "form": str(form).upper().strip(),
+                    "days_ago": age,
+                    "items": str(items[i]) if i < len(items) else "",
+                }
+            )
+
+        out["score"], out["events"] = classify_filing_events(filings)
+        return out
+
+    except Exception as exc:
+        log.warning("%s filing intel failed; neutral: %s", ticker, exc)
+        return out
+
+
 def get_filing_events(ticker, today=None):
-    """End-to-end: ticker -> (score, events). Network-bound, fails open."""
-    return classify_filing_events(fetch_recent_filings(ticker, today))
+    """Back-compat wrapper: ticker -> (score, events)."""
+    intel = get_filing_intel(ticker, today)
+    return intel["score"], intel["events"]
 
 
 if __name__ == "__main__":

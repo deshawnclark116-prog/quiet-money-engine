@@ -142,13 +142,19 @@ def _role_weight(role):
     return 1.0
 
 
-def insider_cluster_score(buys, current_price, today=None):
+def insider_cluster_score(buys, current_price, today=None, avg_dollar_volume=None):
     """Return (points 0-30, detail dict).
 
     buys: rows shaped like the insider_buys table (insider, role, value,
     price, filed_at/seen_at). Only recent rows count; the score rises
     with distinct insiders, executive weight, tight timing, dollar size,
     and whether their entry price is still near the current price.
+
+    avg_dollar_volume: the stock's average daily dollar volume. A buy is
+    conviction only relative to the stock's own size — $150K in a $50M
+    microcap is a signal, $150K in a mega-cap is noise — so when
+    liquidity is known, the whole score is scaled by how meaningful the
+    total purchase is against one day's trading.
     """
     today = today or date.today()
 
@@ -223,7 +229,21 @@ def insider_cluster_score(buys, current_price, today=None):
     # away can never reach a full score.
     points = min(head_pts + tight_pts + size_pts, 25.0) + prox_pts
 
+    # Meaningfulness scaling: total purchases at >= 25% of one day's
+    # dollar volume earn full credit, fading to a 20% floor for buys that
+    # are rounding errors against the stock's own liquidity.
+    liquidity = avg_dollar_volume
+    if not liquidity:
+        row_liq = [float(b.get("avg_dollar_vol") or 0) for b in recent]
+        liquidity = max(row_liq) if any(row_liq) else 0.0
+
+    meaning_mult = 1.0
+    if liquidity and liquidity > 0:
+        meaning_mult = max(0.2, min(1.0, total_value / (0.25 * liquidity)))
+        points *= meaning_mult
+
     detail = {
+        "meaning_mult": round(meaning_mult, 2),
         "distinct_insiders": distinct,
         "weighted_heads": round(weighted_heads, 1),
         "tight_cluster": tight,
