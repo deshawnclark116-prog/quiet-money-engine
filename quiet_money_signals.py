@@ -36,6 +36,12 @@ ABSORPTION_RANGE_BARS = 252      # yearly range used for the low-half bonus
 CLUSTER_WINDOW_DAYS = 90         # buys older than this are ignored
 CLUSTER_TIGHT_DAYS = 14          # 2+ distinct insiders within this = cluster
 PROXIMITY_MAX_PCT = 20.0         # current price within this % of their avg buy
+MIN_INSIDER_VALUE = 10_000.0     # token buys below this never count as evidence
+CURRENCY_SUSPECT_DRIFT_PCT = 50.0  # |current vs avg buy| beyond this means the
+                                   # buy prices are probably a foreign-market
+                                   # currency or another share class (e.g. ADR
+                                   # vs local listing) — never state the
+                                   # comparison as fact
 
 
 def _pct(now, old):
@@ -177,6 +183,19 @@ def insider_cluster_score(buys, current_price, today=None, avg_dollar_volume=Non
         name = str(b.get("insider") or "unknown").strip().lower()
         by_insider.setdefault(name, []).append(b)
 
+    # Token buys are not conviction: an insider only counts as evidence
+    # when their combined recent purchases clear a real-money floor.
+    by_insider = {
+        name: rows
+        for name, rows in by_insider.items()
+        if sum(float(b.get("value") or 0) for b in rows) >= MIN_INSIDER_VALUE
+    }
+
+    if not by_insider:
+        return 0.0, None
+
+    recent = [b for rows in by_insider.values() for b in rows]
+
     distinct = len(by_insider)
     weighted_heads = sum(
         max(_role_weight(b.get("role")) for b in rows)
@@ -264,11 +283,22 @@ def insider_cluster_score(buys, current_price, today=None, avg_dollar_volume=Non
         )
     who.sort(key=lambda w: -w["value"])
 
+    # Price-coherence check: when the insiders' buy prices are wildly far
+    # from the listed price, they are almost certainly in a foreign-market
+    # currency or another share class (e.g. a Brazilian bank's local
+    # shares in reais vs its USD ADR). The buying is still real evidence,
+    # but the price comparison must never be stated as fact.
     entry_drift_pct = None
+    price_comparable = True
     if avg_price and current_price:
-        entry_drift_pct = round(_pct(current_price, avg_price), 1)
+        drift = _pct(current_price, avg_price)
+        if drift is not None and abs(drift) > CURRENCY_SUSPECT_DRIFT_PCT:
+            price_comparable = False
+        else:
+            entry_drift_pct = round(drift, 1)
 
     detail = {
+        "price_comparable": price_comparable,
         "meaning_mult": round(meaning_mult, 2),
         "distinct_insiders": distinct,
         "weighted_heads": round(weighted_heads, 1),
@@ -300,10 +330,11 @@ def describe_quiet_money(absorption, absorption_detail, cluster, cluster_detail)
 
     if cluster_detail:
         d = cluster_detail
+        comparable = d.get("price_comparable", True)
 
         who_bits = [
             f"{w['name']} ({w['role']}) {_money(w['value'])}"
-            + (f" @ ${w['avg_price']:.2f}" if w.get("avg_price") else "")
+            + (f" @ ${w['avg_price']:.2f}" if w.get("avg_price") and comparable else "")
             for w in d.get("who") or []
         ]
 
@@ -312,7 +343,7 @@ def describe_quiet_money(absorption, absorption_detail, cluster, cluster_detail)
             f"{_money(d['total_value'])} open-market in 90d"
         )
 
-        if d.get("avg_buy_price"):
+        if comparable and d.get("avg_buy_price"):
             text += f" — {_money(d['total_value'])} total, avg entry ${d['avg_buy_price']:.2f}"
 
         if d.get("entry_drift_pct") is not None:
@@ -320,6 +351,12 @@ def describe_quiet_money(absorption, absorption_detail, cluster, cluster_detail)
             text += (
                 f"; current price is {drift:+.1f}% vs their entry"
                 + (" (still buyable near their level)" if abs(drift) <= 10 else "")
+            )
+        elif not comparable:
+            text += (
+                "; buy prices as filed don't match this listing "
+                "(likely a foreign local market or another share class) — "
+                "price comparison skipped"
             )
 
         text += f"; newest buy {d['newest_days_ago']}d ago"
