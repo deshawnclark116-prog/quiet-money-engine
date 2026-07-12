@@ -43,6 +43,7 @@ from quiet_money_signals import (
     describe_quiet_money,
     insider_cluster_score,
 )
+from filing_intelligence import get_filing_events
 
 try:
     from universe_builder import build_dynamic_universe
@@ -81,6 +82,13 @@ DISCOVERY_TIER12_LABELS = {
     LABEL_FRESH_BASE,
     LABEL_CONTROLLED_BREAKOUT,
     LABEL_BASE_BUILDING,
+}
+
+# Filing-event intelligence (SEC submissions feed) applied to
+# mission-eligible names only, keeping SEC usage to a handful of
+# requests per run. QME_FILING_EVENTS=off disables it.
+FILING_EVENTS_ENABLED = os.getenv("QME_FILING_EVENTS", "on").strip().lower() not in {
+    "off", "false", "0", "no",
 }
 
 MIN_PRICE = float(os.getenv("MIN_PRICE", "0.10"))
@@ -1021,6 +1029,28 @@ def main() -> None:
         row["rank"] = i
         trade_plan = build_paper_trade_plan(row)
         row.update(trade_plan)
+
+    # Filing-event intelligence: leading SEC events (13D stakes, shelf
+    # withdrawals, late-filing notices, 8-K item codes) adjust conviction
+    # for mission-eligible names. Support evidence only — it can never
+    # qualify a stock by itself, and it fails open per ticker.
+    if DISCOVERY_MODE != "legacy" and FILING_EVENTS_ENABLED:
+        for row in ranked:
+            sig = row.get("signals") or {}
+
+            if safe_float(sig.get("mission_eligible"), 0.0) < 1.0:
+                continue
+
+            try:
+                fe_score, fe_events = get_filing_events(row["ticker"])
+            except Exception as exc:
+                log.warning("%s filing events failed: %s", row["ticker"], exc)
+                continue
+
+            sig["filing_events_score"] = fe_score
+            if fe_events:
+                sig["filing_events"] = "; ".join(fe_events[:4])
+            sig["conviction"] = safe_float(sig.get("conviction"), 0.0) + fe_score
 
     # Production architecture:
     # discovery mode "new": mission-eligible names (price band, Tier 1/2
