@@ -332,15 +332,20 @@ def describe_quiet_money(absorption, absorption_detail, cluster, cluster_detail)
         d = cluster_detail
         comparable = d.get("price_comparable", True)
 
+        # When prices aren't comparable to this listing, the filed VALUES
+        # are in that same foreign currency — never print them with a $.
+        def val(v):
+            return _money(v) if comparable else f"{float(v or 0):,.0f} (as filed, likely local currency)"
+
         who_bits = [
-            f"{w['name']} ({w['role']}) {_money(w['value'])}"
+            f"{w['name']} ({w['role']}) {val(w['value'])}"
             + (f" @ ${w['avg_price']:.2f}" if w.get("avg_price") and comparable else "")
             for w in d.get("who") or []
         ]
 
         text = "Insiders bought open-market: " + "; ".join(who_bits) if who_bits else (
             f"{d['distinct_insiders']} insider(s) bought "
-            f"{_money(d['total_value'])} open-market in 90d"
+            f"{val(d['total_value'])} open-market in 90d"
         )
 
         if comparable and d.get("avg_buy_price"):
