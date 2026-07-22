@@ -171,9 +171,14 @@ def score_trend_turn(closes):
         points += 8.0
     if rising:
         points += 8.0
-    # moving, but not vertical: +2%..+25% over 20 bars earns up to 9 pts
+    # Momentum sweet spot: full credit for a +2%..+12% 20-bar turn, then
+    # TAPERING to zero by +25%. A stock already up 18-25% in a month is a
+    # late entry, not an early one — graded outcomes confirmed the old
+    # full-credit-at-any-size rule was buying post-pop names.
     if 2.0 <= r20 <= 25.0:
-        points += 9.0 * clamp((r20 - 2.0) / 10.0, 0.0, 1.0)
+        base = 9.0 * clamp((r20 - 2.0) / 10.0, 0.0, 1.0)
+        taper = 1.0 if r20 <= 12.0 else clamp((25.0 - r20) / 13.0, 0.0, 1.0)
+        points += base * taper
 
     detail = {"r20": r20, "above_sma20": above, "sma20_rising": rising}
     return points, detail
