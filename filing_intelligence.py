@@ -40,8 +40,10 @@ SCORE_CAP = 15.0
 FORM_RULES = [
     # Leading positives
     (("RW", "RW WD", "AW"), +8.0, "registration WITHDRAWN — dilution threat removed"),
-    (("SC 13D/A",), +3.0, "13D amended — active 5%+ holder still engaged"),
-    (("SC 13D",), +7.0, "NEW 13D — someone crossed 5% ownership and must disclose"),
+    # EDGAR uses both old-style ("SC 13D/A") and new-style ("SCHEDULE
+    # 13D/A") form names — match both, amendments before originals.
+    (("SC 13D/A", "SCHEDULE 13D/A"), +3.0, "13D amended — active 5%+ holder still engaged"),
+    (("SC 13D", "SCHEDULE 13D"), +7.0, "NEW 13D — someone crossed 5% ownership and must disclose"),
     (("8-A12B", "8-A12G"), +5.0, "exchange listing registration (uplisting)"),
     # Leading negatives
     (("25", "25-NSE"), -7.0, "delisting notification"),
