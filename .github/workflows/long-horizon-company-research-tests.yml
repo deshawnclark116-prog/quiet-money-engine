@@ -1,0 +1,22 @@
+name: long-horizon-company-research-tests
+on:
+  push:
+    paths:
+      - 'research/long_horizon/**'
+      - '.github/workflows/long-horizon-company-research-tests.yml'
+  pull_request:
+    paths:
+      - 'research/long_horizon/**'
+      - '.github/workflows/long-horizon-company-research-tests.yml'
+permissions:
+  contents: read
+jobs:
+  verify-research-only:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Validate source-receipt causality and safety gates
+        run: python -m unittest discover -s research/long_horizon -p 'test_*.py' -v
