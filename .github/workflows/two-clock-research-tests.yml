@@ -1,0 +1,22 @@
+name: two-clock-research-tests
+on:
+  push:
+    paths:
+      - 'research/two_clock/**'
+      - '.github/workflows/two-clock-research-tests.yml'
+  pull_request:
+    paths:
+      - 'research/two_clock/**'
+      - '.github/workflows/two-clock-research-tests.yml'
+permissions:
+  contents: read
+jobs:
+  offline-falsification:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Tests - point-in-time, event verification, no trades
+        run: python -m unittest discover -s research/two_clock -p 'test_*.py' -v
