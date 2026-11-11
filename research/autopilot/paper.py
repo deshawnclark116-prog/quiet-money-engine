@@ -105,8 +105,9 @@ def _equity(state, latest, reference_date=None):
     for ticker, p in state["positions"].items():
         last = latest.get(ticker)
         mark = last["close"] if last else float(p["last_mark_price"])
-        total += mark * p["shares"]
-        unrealized += (mark - p["entry_price"]) * p["shares"]
+        liquidation_mark = mark * (1 - IMPACT_BPS / 10000)
+        total += liquidation_mark * p["shares"]
+        unrealized += liquidation_mark * p["shares"] - p["entry_cost"]
         if not last or (reference_date and last["date"] != reference_date):
             stale.append(ticker)
     return round(total, 4), round(unrealized, 4), stale
