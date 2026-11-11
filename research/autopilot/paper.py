@@ -40,6 +40,7 @@ def fresh_state():
         "events": [],
         "equity_history": [],
         "last_signal_date": {},
+        "benchmark": None,
         "last_run_at_utc": None,
     }
 
@@ -254,6 +255,8 @@ def step(state, observations, asof_utc):
     # Pre-close/manual runs cannot backdate a signal to yesterday.
     candidates = []
     for ticker, rows in bars.items():
+        if ticker == "SPY":
+            continue  # benchmark is never a paper trade candidate
         if state["last_signal_date"].get(ticker) == today:
             continue
         if ticker in state["positions"] or any(
@@ -275,6 +278,20 @@ def step(state, observations, asof_utc):
         state["pending_entries"].append(order)
         state["last_signal_date"][order["ticker"]] = today
         _event(state, "SIGNAL", **order)
+
+    # SPY is only a passive reference: compare outcomes against the same
+    # forward period rather than declaring alpha from positive nominal P&L.
+    spy = latest.get("SPY")
+    if spy and spy["date"] == today:
+        previous = state.get("benchmark")
+        if previous is None:
+            state["benchmark"] = {
+                "ticker": "SPY", "start_date": today,
+                "start_close": spy["close"],
+                "last_date": today, "last_close": spy["close"]}
+        elif today >= previous["last_date"]:
+            previous["last_date"] = today
+            previous["last_close"] = spy["close"]
 
     equity, unrealized, stale = _equity(state, latest, today)
     # Record at most one equity mark per market session; re-runs update it.
