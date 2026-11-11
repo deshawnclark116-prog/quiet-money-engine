@@ -164,7 +164,7 @@ class PaperEngineTests(unittest.TestCase):
             restored=json.loads((Path(temp)/"portfolio.json").read_text())
             self.assertEqual(restored["cash"],25.0)
             self.assertEqual(len(restored["pending_entries"]),1)
-            self.assertIn("PAPER", (Path(temp)/"dashboard.md").read_text())
+            self.assertIn("SIMULATED ONLY", (Path(temp)/"dashboard.md").read_text())
 
     def test_completely_missing_data_fails_no_write(self):
         from research.autopilot.paper_runner import run
