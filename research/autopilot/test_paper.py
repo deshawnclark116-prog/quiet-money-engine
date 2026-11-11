@@ -175,5 +175,18 @@ class PaperEngineTests(unittest.TestCase):
         self.assertEqual(state,fresh_state())
 
 
+
+    def test_spy_benchmark_is_not_an_order(self):
+        state=fresh_state()
+        step(state,{"SPY":history()},ASOF_TUE)
+        self.assertEqual(len(state["pending_entries"]),0)
+        self.assertEqual(state["benchmark"]["start_close"],5.25)
+        self.assertEqual(state["benchmark"]["last_date"],"2026-11-10")
+        step(state,{"SPY":history()+[bar("2026-11-11",
+             op=5.40,hi=5.50,lo=5.35,close=5.45)]},ASOF_WED)
+        self.assertEqual(state["benchmark"]["last_close"],5.45)
+        self.assertEqual(len(state["positions"]),0)
+
+
 if __name__=="__main__":
     unittest.main()
