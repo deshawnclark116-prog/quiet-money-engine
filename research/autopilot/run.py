@@ -11,6 +11,7 @@ import re
 import sys
 from data_layer import get_price_history
 from research.autopilot.decision import VERSION,decide,triage
+from research.autopilot.ledger import reconcile,current_events
 
 SYMBOL=re.compile(r"^[A-Z]{1,5}$")
 DEFAULT_ANCHORS="ZOM,SOFI,OPEN,PLUG,RKLB,JOBY,ENVX,ACHR,RIOT,CLSK"
@@ -50,7 +51,7 @@ def load_events(path):
     return output
 
 def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
-        prices=None,companies=None):
+        prices=None,companies=None,prior_ledger=None):
     live_clock=now is None
     now=now or datetime.now(timezone.utc).isoformat()
     moment=datetime.fromisoformat(now.replace("Z","+00:00"))
@@ -87,6 +88,7 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
     top=sorted((r for r in screen if r["status"]=="price_research_candidate"),
                key=lambda r:(-r["research_score"],r["ticker"]))[:max_sec]
     decisions=[]
+    evidence_ledger=prior_ledger if isinstance(prior_ledger,dict) else {}
     automatic_events_count=0
     for item in top:
         ticker=item["ticker"]
@@ -103,9 +105,13 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
         # discovered from current XBRL; editorial news never qualifies.
         auto_events=company.get("verified_primary_events") or []
         automatic_events_count+=len(auto_events)
-        all_events=list(auto_events)+list((events or {}).get(ticker,[]))
         # Decision time follows SEC retrieval; never backdate newly observed facts.
         decision_asof=(datetime.now(timezone.utc).isoformat() if live_clock else now)
+        evidence_ledger=reconcile(evidence_ledger,ticker,
+                                  list(auto_events)+list((events or {}).get(ticker,[])),
+                                  decision_asof)
+        # Reusing original accession first-seen is mandatory across daily runs.
+        all_events=current_events(evidence_ledger,ticker,decision_asof)
         decisions.append(decide(ticker,all_bars[ticker],spy,decision_asof,company,
                                 all_events))
     has_price=any(s["status"]!="abstain" for s in screen)
@@ -120,15 +126,18 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
             "status":status,"universe_count":len(tickers),
             "price_candidates_count":sum(r["status"]=="price_research_candidate" for r in screen),
             "sec_review_count":len(decisions),
-            "verified_event_count":sum(len(r) for r in (events or {}).values())+automatic_events_count,
+            "verified_event_count":sum(len(v) for v in evidence_ledger.get("events",{}).values()),
             "automatic_sec_financial_events_count":automatic_events_count,
+            "ledger_lineage":"restored" if prior_ledger is not None else "new_lineage",
+            "evidence_ledger":evidence_ledger,
             "quote_type":"completed_daily_bars_not_executable_bid_ask",
             "source_errors":errors,"all_scanned":screen,"deep_research":decisions}
 
 def markdown(data):
     out=["# Quiet Money autonomous research radar","",
          "UTC: "+data["run_at_utc"],"Status: "+data["status"],"",
-         "Research only. No verified trading edge, real-time orders or fills.","",
+         "Research only. No verified trading edge, real-time orders or fills.",
+         "Evidence lineage: "+data["ledger_lineage"],"",
          "Scanned: {} | price candidates: {} | SEC-reviewed: {}".format(
              data["universe_count"],data["price_candidates_count"],data["sec_review_count"]),
          "","## Every ticker inspected","",
@@ -159,13 +168,17 @@ def main(argv=None):
     p.add_argument("--max-symbols",type=int,default=70)
     p.add_argument("--max-sec-reviews",type=int,default=12)
     p.add_argument("--verified-events",default="")
+    p.add_argument("--previous-ledger",default="")
     args=p.parse_args(argv)
+    previous=(json.loads(Path(args.previous_ledger).read_text())
+              if args.previous_ledger and Path(args.previous_ledger).is_file() else None)
     report=run(tickers=args.tickers.split(",") if args.tickers else None,
-               events=load_events(args.verified_events),
+               events=load_events(args.verified_events),prior_ledger=previous,
                max_symbols=max(1,min(200,args.max_symbols)),
                max_sec=max(0,min(50,args.max_sec_reviews)))
     path=Path(args.output_dir);path.mkdir(parents=True,exist_ok=True)
     (path/"research_scan.json").write_text(json.dumps(report,indent=2,sort_keys=True))
+    (path/"event_ledger.json").write_text(json.dumps(report["evidence_ledger"],indent=2,sort_keys=True))
     (path/"research_scan.md").write_text(markdown(report))
     print("Radar status:",report["status"])
     print("Tickers:",report["universe_count"],"candidates:",report["price_candidates_count"])
