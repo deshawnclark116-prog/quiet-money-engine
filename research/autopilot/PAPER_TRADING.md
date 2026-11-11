@@ -11,7 +11,7 @@ experiment. Both work without Render.
 1. Merge the PR containing the new files into `main`. GitHub schedules
    only run from the default branch.
 2. Open [GitHub Actions](../../actions/workflows/github-paper-trader.yml).
-   The paper workflow is scheduled around **4:45 p.m. Eastern on weekdays**,
+   The paper workflow is scheduled around **6:35 p.m. Eastern on weekdays**,
    after the daily bar is eligible; GitHub scheduling may be delayed or skipped.
    For a manual run choose **Run workflow** on `main`.
 3. Read the run's **Summary**, or open the
