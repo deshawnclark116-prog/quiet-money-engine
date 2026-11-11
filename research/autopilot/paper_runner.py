@@ -37,6 +37,11 @@ def report(state, result, failures, benchmark=None):
     baseline = hist[first_week - 1]["equity"] if first_week else state["starting_cash"]
     weekly_pnl = equity - baseline
     realized = sum(t["pnl_usd"] for t in trades)
+    spy=state.get("benchmark")
+    spy_return=(100*(spy["last_close"]/spy["start_close"]-1)
+                if spy and spy["start_close"]>0 else None)
+    excess=((equity/state["starting_cash"]-1)*100-spy_return
+            if spy_return is not None else None)
     lines = [
         "# Quiet Money | GitHub paper portfolio",
         "",
@@ -52,6 +57,10 @@ def report(state, result, failures, benchmark=None):
         f"| Cash | ${result['cash']:.2f} |",
         f"| Total net P&L (marked) | ${equity - state['starting_cash']:+.2f} |",
         f"| Total return | {(equity / state['starting_cash'] - 1)*100:+.2f}% |",
+        f"| SPY passive return (observed period) | {spy_return:+.2f}% |" if spy_return is not None else
+            "| SPY passive return | Unavailable |",
+        f"| Return minus SPY (percentage points) | {excess:+.2f} |" if excess is not None else
+            "| Return minus SPY | Unavailable |",
         f"| Current week net P&L (marked) | ${weekly_pnl:+.2f} |",
         f"| Weekly target (not guaranteed) | +$100.00 |",
         f"| Progress against weekly target | {(weekly_pnl / 100)*100:.1f}% |",
@@ -143,7 +152,7 @@ def run(state, *, now=None, tickers=None, provider=None, max_symbols=70):
     tickers=tickers if tickers is not None else universe(
         moment,max_symbols,os.getenv("QME_AUTOPILOT_ANCHORS",DEFAULT_ANCHORS))
     extra=list(state["positions"]) + [p["ticker"] for p in state["pending_entries"]]
-    all_tickers=list(dict.fromkeys([*tickers,*extra]))
+    all_tickers=list(dict.fromkeys([*tickers,*extra,"SPY"]))
     observations={}
     errors=[]
     with ThreadPoolExecutor(max_workers=5) as pool:
