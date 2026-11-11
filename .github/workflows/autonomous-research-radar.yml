@@ -31,7 +31,7 @@ jobs:
           python -m unittest discover -s research/long_horizon -p 'test_*.py' -v
           python -m unittest discover -s research/two_clock -p 'test_*.py' -v
   research:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/feature/autopilot-research-radar-20261110'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
@@ -52,7 +52,7 @@ jobs:
           import datetime,os
           from zoneinfo import ZoneInfo
           now=datetime.datetime.now(ZoneInfo("America/New_York"))
-          fire=os.getenv("GH_EVENT")=="workflow_dispatch" or (now.weekday()<5 and now.hour in (9,16))
+          fire=os.getenv("GH_EVENT") in ("workflow_dispatch","push") or (now.weekday()<5 and now.hour in (9,16))
           with open(os.environ["GITHUB_OUTPUT"],"a") as output:
               output.write("fire="+("true" if fire else "false")+"\n")
           print("Eastern",now.isoformat(),"scan",fire)
