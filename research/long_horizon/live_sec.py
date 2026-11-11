@@ -152,9 +152,16 @@ def research_ticker(ticker: str, *, now_utc: str | None = None,
     seen_at = datetime.now(timezone.utc).isoformat() if now_utc is None else now_utc
     receipts = extract_receipts(raw_facts, seen_at)
     alerts = extract_regulatory_alerts(raw_submissions, seen_at)
-    return assess(ticker=ticker,asof_utc=seen_at,financial_receipts=receipts,
-                  risk_events=alerts,business_milestones=verified_milestones or [],
-                  risk_screen=risk_screen,exchange_listing_verified=listing_verified)
+    from .verified_financial_events import extract_verified_inflections
+    # A financial event needs fresh filing + verified growth and cash-flow
+    # comparisons. This event is research evidence, not a business milestone.
+    fresh_events = extract_verified_inflections(
+        receipts, raw_submissions, seen_at, cik=mapped.get("cik"))
+    result = assess(ticker=ticker,asof_utc=seen_at,financial_receipts=receipts,
+                    risk_events=alerts,business_milestones=verified_milestones or [],
+                    risk_screen=risk_screen,exchange_listing_verified=listing_verified)
+    result["verified_primary_events"] = fresh_events
+    return result
 
 
 def main(argv=None):
