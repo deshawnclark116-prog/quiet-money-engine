@@ -1,0 +1,70 @@
+name: autonomous-research-radar
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "research/autopilot/**"
+      - ".github/workflows/autonomous-research-radar.yml"
+  push:
+    paths:
+      - "research/autopilot/**"
+      - ".github/workflows/autonomous-research-radar.yml"
+  schedule:
+    # 09:45 and 16:45 Eastern under both EST and EDT; unsuited UTC runs are skipped.
+    - cron: "45 13,14,20,21 * * 1-5"
+permissions:
+  contents: read
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Test all three independent research layers
+        run: |
+          python -m unittest discover -s research/autopilot -p 'test_*.py' -v
+          python -m unittest discover -s research/long_horizon -p 'test_*.py' -v
+          python -m unittest discover -s research/two_clock -p 'test_*.py' -v
+  research:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      EDGAR_CONTACT: ${{ secrets.EDGAR_CONTACT }}
+      PRICE_PROVIDER_ORDER: stooq,yahoo
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Only scan at local Eastern market milestones
+        id: timegate
+        env:
+          GH_EVENT: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          import datetime,os
+          from zoneinfo import ZoneInfo
+          now=datetime.datetime.now(ZoneInfo("America/New_York"))
+          fire=os.getenv("GH_EVENT")=="workflow_dispatch" or (now.weekday()<5 and now.hour in (9,16))
+          with open(os.environ["GITHUB_OUTPUT"],"a") as output:
+              output.write("fire="+("true" if fire else "false")+"\n")
+          print("Eastern",now.isoformat(),"scan",fire)
+          PY
+      - name: SEC and price research scan (never trades)
+        if: steps.timegate.outputs.fire == 'true'
+        run: python -m research.autopilot.run --output-dir autopilot_output --max-symbols 70 --max-sec-reviews 12
+      - name: Save complete scanned universe and evaluations
+        if: always() && steps.timegate.outputs.fire == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: quiet-money-research-${{ github.run_id }}
+          path: autopilot_output/
+          retention-days: 30
+          if-no-files-found: warn
