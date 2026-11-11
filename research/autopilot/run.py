@@ -1,6 +1,7 @@
 """Scheduled SEC-first research radar: does not depend on Render or a broker."""
 from __future__ import annotations
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime,timezone
 import hashlib
 import json
@@ -70,14 +71,19 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
         errors.append({"ticker":"SPY","source":"market_data",
                        "error_type":type(exc).__name__})
     all_bars={};screen=[]
-    for ticker in tickers:
-        try:rows=prices(ticker,180) or []
-        except Exception as exc:
-            rows=[]
-            errors.append({"ticker":ticker,"source":"market_data",
-                           "error_type":type(exc).__name__})
-        all_bars[ticker]=rows
-        screen.append({"ticker":ticker,**triage(rows,now)})
+    # Bounded concurrency is for daily price feeds only, never SEC requests.
+    # This keeps the scheduled job from blocking on dozens of slow symbols.
+    workers=max(1,min(5,int(os.getenv("QME_PRICE_FETCH_WORKERS","5"))))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures={ticker:pool.submit(prices,ticker,180) for ticker in tickers}
+        for ticker in tickers:
+            try:rows=futures[ticker].result() or []
+            except Exception as exc:
+                rows=[]
+                errors.append({"ticker":ticker,"source":"market_data",
+                               "error_type":type(exc).__name__})
+            all_bars[ticker]=rows
+            screen.append({"ticker":ticker,**triage(rows,now)})
     top=sorted((r for r in screen if r["status"]=="price_research_candidate"),
                key=lambda r:(-r["research_score"],r["ticker"]))[:max_sec]
     decisions=[]
