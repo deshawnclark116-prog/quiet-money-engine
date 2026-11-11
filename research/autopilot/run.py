@@ -50,6 +50,7 @@ def load_events(path):
 
 def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
         prices=None,companies=None):
+    live_clock=now is None
     now=now or datetime.now(timezone.utc).isoformat()
     moment=datetime.fromisoformat(now.replace("Z","+00:00"))
     if moment.tzinfo is None:raise ValueError("offset_aware_asof_required")
@@ -91,7 +92,9 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
             company={"ticker":ticker,"classification":"insufficient_evidence",
                      "reason":"SEC_data_unavailable","long_term_flag":False,
                      "flag_for_deeper_research":False}
-        decisions.append(decide(ticker,all_bars[ticker],spy,now,company,
+        # Decision time follows SEC retrieval; never backdate newly observed facts.
+        decision_asof=(datetime.now(timezone.utc).isoformat() if live_clock else now)
+        decisions.append(decide(ticker,all_bars[ticker],spy,decision_asof,company,
                                 (events or {}).get(ticker,[])))
     has_price=any(s["status"]!="abstain" for s in screen)
     contact=os.getenv("EDGAR_CONTACT","")
@@ -99,7 +102,9 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
     status=("degraded_market_data" if not has_price else
             "price_scan_only_missing_SEC_contact" if not usable_contact else
             "research_scan_completed")
-    return {"version":VERSION,"run_at_utc":now,"mode":"research_only_no_orders",
+    return {"version":VERSION,"run_at_utc":now,
+            "completed_at_utc":datetime.now(timezone.utc).isoformat() if live_clock else now,
+            "mode":"research_only_no_orders",
             "status":status,"universe_count":len(tickers),
             "price_candidates_count":sum(r["status"]=="price_research_candidate" for r in screen),
             "sec_review_count":len(decisions),
