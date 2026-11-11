@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import copy
+import json
+from pathlib import Path
+import tempfile
 from datetime import date, timedelta
 import unittest
 
@@ -143,6 +146,33 @@ class PaperEngineTests(unittest.TestCase):
         self.assertEqual(signal["signal_type"],
                          "unvalidated_price_volume_acceleration")
         self.assertNotIn("probability",signal)
+
+
+
+    def test_runner_writes_complete_recoverable_portfolio(self):
+        from research.autopilot.paper_runner import run, save
+        state=fresh_state()
+        res,errors=run(state,now=ASOF_TUE,tickers=["ACME"],
+                       provider=lambda ticker, days: history())
+        self.assertEqual(res["pending"],1)
+        with tempfile.TemporaryDirectory() as temp:
+            save(state,res,errors,temp)
+            expected={"portfolio.json","dashboard.md","latest_run.json",
+                      "closed_trades.csv","equity_history.csv"}
+            self.assertTrue(expected.issubset(
+                {p.name for p in Path(temp).iterdir()}))
+            restored=json.loads((Path(temp)/"portfolio.json").read_text())
+            self.assertEqual(restored["cash"],25.0)
+            self.assertEqual(len(restored["pending_entries"]),1)
+            self.assertIn("PAPER", (Path(temp)/"dashboard.md").read_text())
+
+    def test_completely_missing_data_fails_no_write(self):
+        from research.autopilot.paper_runner import run
+        state=fresh_state()
+        with self.assertRaises(RuntimeError):
+            run(state,now=ASOF_TUE,tickers=["ACME"],
+                provider=lambda ticker, days: [])
+        self.assertEqual(state,fresh_state())
 
 
 if __name__=="__main__":
