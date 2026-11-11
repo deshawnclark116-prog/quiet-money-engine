@@ -259,6 +259,12 @@ def step(state, observations, asof_utc):
         if ticker in state["positions"] or any(
                 o["ticker"] == ticker for o in state["pending_entries"]):
             continue
+        # Avoid immediately recycling a stopped-out name into a new order.
+        if any(t["ticker"] == ticker and
+               0 <= (date.fromisoformat(today) -
+                     date.fromisoformat(t["exit_date"])).days <= 7
+               for t in state["closed_trades"][-100:]):
+            continue
         signal = _signal(ticker, rows, asof_utc, today)
         if signal:
             candidates.append(signal)
