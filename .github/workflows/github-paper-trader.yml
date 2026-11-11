@@ -1,0 +1,136 @@
+name: github-only-paper-trader
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "research/autopilot/paper.py"
+      - "research/autopilot/paper_runner.py"
+      - "research/autopilot/test_paper.py"
+      - ".github/workflows/github-paper-trader.yml"
+      - "data_layer.py"
+  push:
+    paths:
+      - "research/autopilot/paper.py"
+      - "research/autopilot/paper_runner.py"
+      - "research/autopilot/test_paper.py"
+      - ".github/workflows/github-paper-trader.yml"
+      - "data_layer.py"
+  schedule:
+    # Runs at about 18:35 ET on weekdays; two UTC hours account for DST.
+    # GitHub can delay or skip scheduled jobs; never a live execution service.
+    - cron: "35 22,23 * * 1-5"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quiet-money-paper-state
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python dependencies
+        run: pip install -r requirements.txt
+      - name: Paper engine and source-contract tests
+        run: |
+          python -m unittest discover -s research/autopilot -p 'test_*.py' -v
+          python -m unittest discover -s research/long_horizon -p 'test_*.py' -v
+          python -m unittest discover -s research/two_clock -p 'test_*.py' -v
+
+  paper:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      PRICE_PROVIDER_ORDER: stooq,yahoo
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Only run after US market close at Eastern scheduled hour
+        id: timegate
+        env:
+          GH_EVENT: ${{ github.event_name }}
+        run: |
+          python - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+          import os
+          now=datetime.now(ZoneInfo("America/New_York"))
+          scheduled=now.weekday()<5 and now.hour==18 and now.minute>=30
+          fire=os.environ["GH_EVENT"]=="workflow_dispatch" or scheduled
+          with open(os.environ["GITHUB_OUTPUT"],"a") as out:
+              out.write("fire="+("true" if fire else "false")+"\n")
+          print("Eastern:",now.isoformat(),"run:",fire)
+          PY
+      - name: Restore existing paper portfolio from GitHub (refuse accidental reset)
+        if: steps.timegate.outputs.fire == 'true'
+        run: |
+          if git fetch origin 'refs/heads/paper-state:refs/remotes/origin/paper-state' 2>/dev/null; then
+            if ! git show origin/paper-state:paper/portfolio.json > previous_portfolio.json; then
+              echo "::error::paper-state branch exists but portfolio.json missing: refusing reset"
+              exit 1
+            fi
+            echo "Restored authoritative portfolio from paper-state branch."
+          else
+            echo "New paper-state lineage; starting capital is $25 PAPER ONLY."
+          fi
+      - name: Run next-session conservative paper-trade evaluation
+        if: steps.timegate.outputs.fire == 'true'
+        run: |
+          python -m research.autopilot.paper_runner --state previous_portfolio.json --output-dir paper_output --max-symbols 70
+      - name: Publish dashboard in GitHub Actions summary
+        if: always() && steps.timegate.outputs.fire == 'true'
+        run: |
+          if [ -f paper_output/dashboard.md ]; then
+            cat paper_output/dashboard.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Paper run failed before dashboard; state was not committed." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Commit and preserve portfolio on separate GitHub branch
+        if: steps.timegate.outputs.fire == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/qme-paper-snapshot
+          cp paper_output/* /tmp/qme-paper-snapshot/
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git show-ref --verify --quiet refs/remotes/origin/paper-state; then
+            git switch -c paper-state --track origin/paper-state
+          else
+            git switch -c paper-state
+          fi
+          mkdir -p paper
+          cp /tmp/qme-paper-snapshot/* paper/
+          git add paper/portfolio.json paper/dashboard.md paper/latest_run.json paper/closed_trades.csv paper/equity_history.csv
+          if git diff --cached --quiet; then
+            echo "No portfolio changes."
+          else
+            git commit -m "paper: record forward-simulated portfolio state"
+            git push origin HEAD:refs/heads/paper-state
+          fi
+          echo "Portfolio state: https://github.com/$GITHUB_REPOSITORY/tree/paper-state/paper" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain run-level paper artifacts
+        if: always() && steps.timegate.outputs.fire == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: paper-run-${{ github.run_id }}
+          path: paper_output/
+          retention-days: 30
+          if-no-files-found: warn
