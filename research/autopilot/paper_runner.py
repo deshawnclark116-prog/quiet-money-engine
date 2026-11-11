@@ -103,9 +103,9 @@ def report(state, result, failures, benchmark=None):
               "- A first-day equity snapshot is not evidence of strategy quality. "
               "Independent out-of-sample testing, more trades, and liquidity/quotes "
               "are required before real-money consideration.",
-              "- A +$100 weekly target from £25 starting capital, if read as "
-              "US dollars, would be a 400% weekly return; it is an aspirational "
-              "measurement, not a plausible guarantee.".replace("£25", "$25"),
+              "- A +$100 weekly target from $25 starting capital "
+              "would be a 400% weekly return; it is an aspirational "
+              "measurement, not a plausible guarantee.",
               ""]
     return "\n".join(lines)
 
