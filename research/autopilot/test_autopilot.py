@@ -60,6 +60,11 @@ class AutopilotTests(unittest.TestCase):
         self.assertEqual(category({"status":"abstain"},
                     {"classification":"risk_blocked","long_term_flag":False}),"risk_blocked")
 
+    def test_active_filing_risk_blocks_even_positive_price_hypothesis(self):
+        self.assertEqual(category({"status":"dislocation_candidate"},
+                    {"classification":"risk_blocked","long_term_flag":True}),
+                    "risk_blocked")
+
     def test_operator_event_attestation_required(self):
         with tempfile.TemporaryDirectory() as td:
             path=Path(td)/"events.json"
