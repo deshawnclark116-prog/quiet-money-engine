@@ -19,15 +19,25 @@ trade fills, probabilities or $100/week profit claims are manufactured.
 4. On the top 12, call the existing Company Conviction SEC adapter. Data
    errors, missing finances, no listing verification, incomplete filing risk
    review and missing independent milestone verification stay unknown.
-5. Run the Two-Clock price-response hypothesis **only** against properly
-   attested positive SEC events first seen before the decision date.
-   Without authenticated evidence it abstains; never turn generic 8-K or
-   hype sentiment into a verified positive event.
-6. Keep short-term and long-term research independent. A capital-structure
+5. Automatically inspect new 10-Q/10-K CompanyFacts revenue and operating
+   cash-flow comparisons for a **strictly defined** verifiable financial
+   inflection. Require comparable annual/quarter values and a recent filing;
+   this is a narrow objective catalyst, **not** proof of a good business.
+   Human-attested primary events may also be supplied in a JSON file.
+   A generic 8-K or upbeat article is never enough.
+6. Feed only verified fresh primary events into the Two-Clock response
+   hypothesis. If there is no verified event, the model abstains. SEC event
+   IDs and their **original first-seen** timestamps are restored from the
+   prior GitHub Actions artifact so that a refreshed filing is not mistaken
+   for new information.
+7. Keep short-term and long-term research independent. A capital-structure
    proxy estimates market cap, enterprise value and net cash/share **only**
    when supporting financial observations exist. It does not pretend to
    be a fair-value or entry model.
-7. Write files to Actions artifact: research_scan.md and research_scan.json.
+8. Write files to Actions artifact: research_scan.md, research_scan.json
+   and event_ledger.json. The Markdown all-stock list also appears directly
+   in the GitHub Actions run Summary. A missing prior ledger is identified
+   as a new research lineage and is never silently passed off as complete.
 
 All orders are explicitly disabled (including fake/paper fills) until a
 separate executable bid/ask, liquidity, broker eligibility, cash settlement,
@@ -36,16 +46,25 @@ portfolio controls and prospective proof are implemented and validated.
 ## Schedule / operation
 - GitHub Actions -> autonomous-research-radar; scheduled near 09:45 and
   16:45 America/New_York on weekdays; DST handled by UTC candidates and
-  Eastern time gate. GitHub's queue may delay or miss schedules.
+  Eastern time gate. The job is a periodic daily-price RESEARCH report,
+  not intraday scalping or a live trading monitor.
+  GitHub's queue may delay or miss schedules.
 - Run manually in GitHub with workflow_dispatch if desired.
-- Each research run uploads a report artifact retained for 30 days.
+- Each research run uploads the full scanned universe, its research decisions,
+  and an event-ledger artifact retained for 30 days. Ledger continuity is
+  best-effort artifact restoration, not an audited permanent database.
+  Missing/expired artifacts explicitly reset the lineage.
 - A code push/PR runs offline contract tests rather than executing a live scan.
 - API/worker/cron on Render remain separate; if suspended for billing they
   **do not start** because this GitHub workflow runs.
 - EDGAR_CONTACT must be configured as a **repository Actions secret**, with a
-  real SEC-compliant User-Agent contact. Never commit a private email into
-  this public repository. Without that secret, results are explicitly labeled
-  price-only/missing-contact, and company research refuses to promote.
+  real SEC-compliant User-Agent contact (name and email). Never commit a
+  private email into this public repository. Without that secret, results
+  are explicitly labeled price-only/missing-contact, and company research
+  refuses to promote. The first live smoke test had NO such secret.
+  A successful price-data smoke test therefore does not validate live SEC
+  retrieval or prove the financial inflection event detector is finding
+  any eligible companies.
 - Public data providers can be stale, throttled or disappear. No useful
   market data marks a run degraded, not falsely successful.
 
