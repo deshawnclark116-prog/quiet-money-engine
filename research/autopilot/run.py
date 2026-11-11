@@ -87,6 +87,7 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
     top=sorted((r for r in screen if r["status"]=="price_research_candidate"),
                key=lambda r:(-r["research_score"],r["ticker"]))[:max_sec]
     decisions=[]
+    automatic_events_count=0
     for item in top:
         ticker=item["ticker"]
         try:company=companies(ticker)
@@ -98,10 +99,15 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
             company={"ticker":ticker,"classification":"insufficient_evidence",
                      "reason":"SEC_data_unavailable","long_term_flag":False,
                      "flag_for_deeper_research":False}
+        # New, objectively verified SEC financial changes are automatically
+        # discovered from current XBRL; editorial news never qualifies.
+        auto_events=company.get("verified_primary_events") or []
+        automatic_events_count+=len(auto_events)
+        all_events=list(auto_events)+list((events or {}).get(ticker,[]))
         # Decision time follows SEC retrieval; never backdate newly observed facts.
         decision_asof=(datetime.now(timezone.utc).isoformat() if live_clock else now)
         decisions.append(decide(ticker,all_bars[ticker],spy,decision_asof,company,
-                                (events or {}).get(ticker,[])))
+                                all_events))
     has_price=any(s["status"]!="abstain" for s in screen)
     contact=os.getenv("EDGAR_CONTACT","")
     usable_contact="@" in contact and "example" not in contact.lower()
@@ -114,7 +120,8 @@ def run(*,now=None,tickers=None,events=None,max_symbols=70,max_sec=12,
             "status":status,"universe_count":len(tickers),
             "price_candidates_count":sum(r["status"]=="price_research_candidate" for r in screen),
             "sec_review_count":len(decisions),
-            "verified_event_count":sum(len(r) for r in (events or {}).values()),
+            "verified_event_count":sum(len(r) for r in (events or {}).values())+automatic_events_count,
+            "automatic_sec_financial_events_count":automatic_events_count,
             "quote_type":"completed_daily_bars_not_executable_bid_ask",
             "source_errors":errors,"all_scanned":screen,"deep_research":decisions}
 
