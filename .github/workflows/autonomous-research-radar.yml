@@ -14,6 +14,7 @@ on:
     - cron: "45 13,14,20,21 * * 1-5"
 permissions:
   contents: read
+  actions: read
 jobs:
   contracts:
     runs-on: ubuntu-latest
@@ -57,9 +58,32 @@ jobs:
               output.write("fire="+("true" if fire else "false")+"\n")
           print("Eastern",now.isoformat(),"scan",fire)
           PY
+      - name: Restore previous immutable SEC evidence ledger
+        if: steps.timegate.outputs.fire == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p prior
+          ids=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow autonomous-research-radar.yml --limit 20 --json databaseId --jq '.[].databaseId' 2>/dev/null || true)
+          for id in $ids; do
+            mkdir -p prior/one
+            if gh run download "$id" --repo "$GITHUB_REPOSITORY" --dir prior/one --pattern 'quiet-money-research-*' >/dev/null 2>&1; then
+              found=$(find prior/one -name event_ledger.json -type f | head -n 1)
+              if [ -n "$found" ]; then
+                cp "$found" previous_ledger.json
+                break
+              fi
+            fi
+            rm -rf prior/one
+          done
+          if [ -f previous_ledger.json ]; then
+            echo "Prior SEC first-seen evidence restored." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No prior evidence artifact; starting a new research lineage." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: SEC and price research scan (never trades)
         if: steps.timegate.outputs.fire == 'true'
-        run: python -m research.autopilot.run --output-dir autopilot_output --max-symbols 70 --max-sec-reviews 12
+        run: python -m research.autopilot.run --output-dir autopilot_output --max-symbols 70 --max-sec-reviews 12 --previous-ledger previous_ledger.json
       - name: Display complete researched stock list in Actions Summary
         if: always() && steps.timegate.outputs.fire == 'true'
         run: |
