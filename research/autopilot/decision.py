@@ -75,12 +75,12 @@ def value_screen(company,price):
             "cash_to_market_cap_proxy":round(cash/cap,4)}
 
 def category(two_clock,company):
+    if company.get("classification")=="risk_blocked":return "risk_blocked"
     short=two_clock.get("status")=="dislocation_candidate"
     long_=company.get("long_term_flag") is True
     if short and long_: return "dual_research_candidate"
     if short:return "short_term_research_only"
     if long_:return "long_term_research_only"
-    if company.get("classification")=="risk_blocked":return "risk_blocked"
     if company.get("flag_for_deeper_research") is True:return "financial_triage_only"
     return "insufficient_verified_evidence"
 
