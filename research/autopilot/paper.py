@@ -211,10 +211,19 @@ def step(state, observations, asof_utc):
     moment = datetime.fromisoformat(asof_utc.replace("Z", "+00:00"))
     if moment.tzinfo is None:
         raise ValueError("asof_must_have_timezone")
-    today = moment.astimezone(ET).date().isoformat()
+    wall_date = moment.astimezone(ET).date()
     bars = {str(t).upper(): _valid_complete(rows, asof_utc)
             for t, rows in observations.items()}
     latest = {t: rows[-1] for t, rows in bars.items() if rows}
+    # GitHub jobs can arrive hours late or after local midnight. The
+    # market session is the most recent COMPLETED observed daily bar,
+    # not the date on the runner's wall clock.
+    latest_session = max((r["date"] for r in latest.values()), default=None)
+    today = latest_session or wall_date.isoformat()
+    if latest_session:
+        age = (wall_date - date.fromisoformat(today)).days
+        if age < 0 or age > 5:
+            raise ValueError("missing_recent_completed_market_session")
 
     for ticker in sorted(list(state["positions"])):
         p = state["positions"][ticker]
