@@ -17,9 +17,9 @@ on:
       - ".github/workflows/github-paper-trader.yml"
       - "data_layer.py"
   schedule:
-    # Runs at about 18:35 ET on weekdays; two UTC hours account for DST.
-    # GitHub can delay or skip scheduled jobs; never a live execution service.
-    - cron: "35 22,23 * * 1-5"
+    # At/after 18:35 ET in both US daylight and standard time.
+    # One run/day; jobs can be hours late, so no exact-hour rejection.
+    - cron: "35 23 * * 1-5"
 
 permissions:
   contents: read
@@ -63,7 +63,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
-      - name: Only run after US market close at Eastern scheduled hour
+      - name: Accept late GitHub schedules; finalized bars gate time correctly
         id: timegate
         env:
           GH_EVENT: ${{ github.event_name }}
@@ -73,8 +73,7 @@ jobs:
           from zoneinfo import ZoneInfo
           import os
           now=datetime.now(ZoneInfo("America/New_York"))
-          scheduled=now.weekday()<5 and now.hour==18 and now.minute>=30
-          fire=os.environ["GH_EVENT"]=="workflow_dispatch" or scheduled
+          fire=os.environ["GH_EVENT"] in ("workflow_dispatch", "schedule")
           with open(os.environ["GITHUB_OUTPUT"],"a") as out:
               out.write("fire="+("true" if fire else "false")+"\n")
           print("Eastern:",now.isoformat(),"run:",fire)
