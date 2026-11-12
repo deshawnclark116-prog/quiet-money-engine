@@ -176,6 +176,27 @@ class PaperEngineTests(unittest.TestCase):
 
 
 
+    def test_delayed_github_job_still_records_previous_completed_session(self):
+        state = fresh_state()
+        delayed = "2026-11-11T03:18:00+00:00"  # 10:18 PM ET previous day
+        # Latest completed bar is Tuesday, not runner wall date.
+        step(state, {"ACME": history()}, delayed)
+        self.assertEqual(state["pending_entries"][0]["signal_date"], "2026-11-10")
+        self.assertEqual(state["equity_history"][0]["date"], "2026-11-10")
+
+    def test_next_morning_job_uses_previous_session_only(self):
+        state = fresh_state()
+        step(state, {"ACME": history() + [bar("2026-11-11")]},
+             "2026-11-12T14:23:00+00:00")
+        self.assertEqual(state["pending_entries"][0]["signal_date"], "2026-11-11")
+        self.assertEqual(len(state["positions"]), 0)
+
+    def test_stale_daily_feed_does_not_queue_trade(self):
+        state = fresh_state()
+        with self.assertRaisesRegex(ValueError, "missing_recent"):
+            step(state, {"ACME": history()}, "2026-11-30T15:00:00+00:00")
+        self.assertEqual(len(state["events"]), 0)
+
     def test_spy_benchmark_is_not_an_order(self):
         state=fresh_state()
         step(state,{"SPY":history()},ASOF_TUE)
