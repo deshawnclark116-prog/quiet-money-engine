@@ -8,10 +8,7 @@
     "open": 0,
     "pending": 2,
     "scan_count": 71,
-    "signals": [
-      "ACHR",
-      "AMPX"
-    ],
+    "signals": [],
     "stale_positions": [],
     "unrealized_pnl": 0.0
   },
