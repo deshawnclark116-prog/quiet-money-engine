@@ -1,0 +1,22 @@
+{
+  "evaluation": {
+    "cash": 25.0,
+    "closed": 0,
+    "date": "2026-11-12",
+    "equity": 25.0,
+    "nonempty_feeds": 70,
+    "open": 0,
+    "pending": 2,
+    "scan_count": 71,
+    "signals": [
+      "ACHR",
+      "AMPX"
+    ],
+    "stale_positions": [],
+    "unrealized_pnl": 0.0
+  },
+  "paper_only": true,
+  "source": "daily_bars_not_real_time_bid_ask",
+  "source_errors": [],
+  "version": "github_paper_v1"
+}
