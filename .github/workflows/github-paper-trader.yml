@@ -17,9 +17,12 @@ on:
       - ".github/workflows/github-paper-trader.yml"
       - "data_layer.py"
   schedule:
-    # At/after 18:35 ET in both US daylight and standard time.
-    # One run/day; jobs can be hours late, so no exact-hour rejection.
+    # Repeated wakeups because GitHub schedules can be delayed/dropped.
+    # The persistent per-session trade ledger makes retries idempotent.
+    # 18:35 EST / 19:35 EDT, then later UTC backup windows.
     - cron: "35 23 * * 1-5"
+    - cron: "12 1,3 * * 2-6"
+    - cron: "37 12 * * 1-5"
 
 permissions:
   contents: read
@@ -46,7 +49,7 @@ jobs:
           python -m unittest discover -s research/two_clock -p 'test_*.py' -v
 
   paper:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -73,7 +76,7 @@ jobs:
           from zoneinfo import ZoneInfo
           import os
           now=datetime.now(ZoneInfo("America/New_York"))
-          fire=os.environ["GH_EVENT"] in ("workflow_dispatch", "schedule")
+          fire=os.environ["GH_EVENT"] in ("workflow_dispatch", "schedule", "push")
           with open(os.environ["GITHUB_OUTPUT"],"a") as out:
               out.write("fire="+("true" if fire else "false")+"\n")
           print("Eastern:",now.isoformat(),"run:",fire)
