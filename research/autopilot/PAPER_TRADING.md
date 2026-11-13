@@ -11,8 +11,8 @@ experiment. Both work without Render.
 1. Merge the PR containing the new files into `main`. GitHub schedules
    only run from the default branch.
 2. Open [GitHub Actions](../../actions/workflows/github-paper-trader.yml).
-   The paper workflow is scheduled at **6:35 p.m. Eastern (7:35 p.m. during daylight time) on weekdays**,
-   after the daily bar is eligible; GitHub scheduling may be delayed or skipped. Late jobs use the latest\n   **completed session**, even after midnight. Scheduled runs are not\n   discarded just because GitHub starts them outside the requested hour.
+   The paper workflow first attempts at **6:35 p.m. Eastern (7:35 p.m. during daylight time) on weekdays**,
+   after the daily bar is eligible; GitHub scheduling may be delayed or skipped. Late jobs use the latest\n   **completed session**, even after midnight. Additional UTC retry windows\n   attempt to avoid GitHub cron delays/skips; repeats cannot buy twice on one signal.\n   A change to the workflow merged into `main` also triggers a one-time paper bootstrap. Scheduled runs are not\n   discarded just because GitHub starts them outside the requested hour.
    For a manual run choose **Run workflow** on `main`.
 3. Read the run's **Summary**, or open the
    [paper-state portfolio history](../../tree/paper-state/paper).
