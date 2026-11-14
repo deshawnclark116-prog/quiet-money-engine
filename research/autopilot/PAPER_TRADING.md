@@ -74,3 +74,8 @@ python -m research.autopilot.paper_runner --output-dir paper_output --max-symbol
 
 Never put broker credentials or personal information in repository files.
 This system has no brokerage dependency and never submits an order.
+
+GitHub Actions `workflow_run` also wakes the paper portfolio after a successful
+scheduled `autonomous-research-radar` run on the main branch. This couples the
+research completion signal to the paper processor and reduces dependence on
+GitHub cron reliability; each completed session is processed idempotently.
