@@ -2,6 +2,12 @@ name: github-only-paper-trader
 
 on:
   workflow_dispatch:
+  # GitHub can delay/skip cron triggers entirely. A successful, independent
+  # completed research scan also wakes the paper portfolio for the same day.
+  workflow_run:
+    workflows: ["autonomous-research-radar"]
+    types: [completed]
+    branches: [main]
   pull_request:
     paths:
       - "research/autopilot/paper.py"
@@ -49,7 +55,7 @@ jobs:
           python -m unittest discover -s research/two_clock -p 'test_*.py' -v
 
   paper:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main') || (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'schedule' && github.event.workflow_run.head_branch == 'main')
     needs: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -76,7 +82,7 @@ jobs:
           from zoneinfo import ZoneInfo
           import os
           now=datetime.now(ZoneInfo("America/New_York"))
-          fire=os.environ["GH_EVENT"] in ("workflow_dispatch", "schedule", "push")
+          fire=os.environ["GH_EVENT"] in ("workflow_dispatch", "schedule", "push", "workflow_run")
           with open(os.environ["GITHUB_OUTPUT"],"a") as out:
               out.write("fire="+("true" if fire else "false")+"\n")
           print("Eastern:",now.isoformat(),"run:",fire)
