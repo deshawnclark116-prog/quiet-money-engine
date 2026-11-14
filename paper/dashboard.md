@@ -7,25 +7,25 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Metric | Value |
 |---|---:|
-| Latest evaluation date | 2026-11-12 |
+| Latest evaluation date | 2026-11-13 |
 | Initial bankroll | $25.00 |
-| Marked portfolio equity | $25.00 |
-| Cash | $25.00 |
-| Total net P&L (marked) | $+0.00 |
-| Total return | +0.00% |
-| SPY passive return (observed period) | +0.00% |
-| Return minus SPY (percentage points) | +0.00 |
-| Current week net P&L (marked) | $+0.00 |
+| Marked portfolio equity | $23.37 |
+| Cash | $15.50 |
+| Total net P&L (marked) | $-1.63 |
+| Total return | -6.54% |
+| SPY passive return (observed period) | -0.36% |
+| Return minus SPY (percentage points) | -6.17 |
+| Current week net P&L (marked) | $-1.63 |
 | Weekly target (not guaranteed) | +$100.00 |
-| Progress against weekly target | 0.0% |
-| Realized P&L | $+0.00 |
-| Unrealized P&L, price marks | $+0.00 |
-| Closed trades | 0 |
+| Progress against weekly target | -1.6% |
+| Realized P&L | $-1.14 |
+| Unrealized P&L, price marks | $-0.49 |
+| Closed trades | 1 |
 | Winning trades | 0 |
-| Closed-trade win rate | Not yet measurable |
-| Max snapshot-to-snapshot drawdown | 0.00% |
-| Open positions | 0 |
-| Pending next-session entries | 2 |
+| Closed-trade win rate | 0.0% |
+| Max snapshot-to-snapshot drawdown | 6.54% |
+| Open positions | 1 |
+| Pending next-session entries | 0 |
 | Price feed errors | 0 |
 | Stale position marks | None |
 
@@ -33,20 +33,19 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Ticker | Shares | Entry | Stop | Target | Opened |
 |---|---:|---:|---:|---:|---|
-| None | — | — | — | — | — |
+| AMPX | 1 | $8.3622 | $7.6933 | $9.7002 | 2026-11-13 |
 
 ## Pending signals
 
 | Ticker | Recorded session | Close when signaled |
 |---|---|---:|
-| AMPX | 2026-11-12 | $8.3500 |
-| ACHR | 2026-11-12 | $4.3300 |
+| None | — | — |
 
 ## Most recent closed paper trades
 
 | Ticker | Entry | Exit | Shares | Net P&L | Exit trigger |
 |---|---|---|---:|---:|---|
-| None | — | — | — | — | — |
+| ACHR | 2026-11-13 | 2026-11-13 | 3 | $-1.14 | protective_stop |
 
 ## Evidence and operating rules
 

@@ -1,13 +1,26 @@
 {
   "benchmark": {
-    "last_close": 757.1199951171875,
-    "last_date": "2026-11-12",
+    "last_close": 754.3699951171875,
+    "last_date": "2026-11-13",
     "start_close": 757.1199951171875,
     "start_date": "2026-11-12",
     "ticker": "SPY"
   },
-  "cash": 25.0,
-  "closed_trades": [],
+  "cash": 15.4952,
+  "closed_trades": [
+    {
+      "entry_date": "2026-11-13",
+      "entry_price": 4.382625,
+      "exit_date": "2026-11-13",
+      "exit_price": 4.001775,
+      "exit_reason": "protective_stop",
+      "pnl_usd": -1.14255,
+      "return_pct": -8.69,
+      "shares": 3,
+      "signal_date": "2026-11-12",
+      "ticker": "ACHR"
+    }
+  ],
   "equity_history": [
     {
       "cash": 25.0,
@@ -15,6 +28,13 @@
       "equity": 25.0,
       "stale_positions": [],
       "unrealized_pnl": 0.0
+    },
+    {
+      "cash": 15.4952,
+      "date": "2026-11-13",
+      "equity": 23.3657,
+      "stale_positions": [],
+      "unrealized_pnl": -0.4917
     }
   ],
   "events": [
@@ -35,31 +55,64 @@
       "signal_date": "2026-11-12",
       "signal_type": "unvalidated_price_volume_acceleration",
       "ticker": "ACHR"
+    },
+    {
+      "entry_cost": 8.36225,
+      "entry_date": "2026-11-13",
+      "entry_price": 8.36225,
+      "kind": "ENTRY",
+      "seq": 3,
+      "shares": 1,
+      "signal_date": "2026-11-12",
+      "ticker": "AMPX"
+    },
+    {
+      "entry_cost": 13.147875,
+      "entry_date": "2026-11-13",
+      "entry_price": 4.382625,
+      "kind": "ENTRY",
+      "seq": 4,
+      "shares": 3,
+      "signal_date": "2026-11-12",
+      "ticker": "ACHR"
+    },
+    {
+      "entry_date": "2026-11-13",
+      "entry_price": 4.382625,
+      "exit_date": "2026-11-13",
+      "exit_price": 4.001775,
+      "exit_reason": "protective_stop",
+      "kind": "EXIT",
+      "pnl_usd": -1.14255,
+      "return_pct": -8.69,
+      "seq": 5,
+      "shares": 3,
+      "signal_date": "2026-11-12",
+      "ticker": "ACHR"
     }
   ],
-  "last_run_at_utc": "2026-11-13T19:58:26.463216+00:00",
+  "last_run_at_utc": "2026-11-14T02:42:41.152807+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12"
   },
   "mode": "PAPER_ONLY_NO_BROKER",
-  "pending_entries": [
-    {
-      "score": 13.9761,
-      "signal_close": 8.350000381469727,
+  "pending_entries": [],
+  "positions": {
+    "AMPX": {
+      "entry_cost": 8.36225,
+      "entry_date": "2026-11-13",
+      "entry_price": 8.36225,
+      "last_evaluated_date": "2026-11-13",
+      "last_mark_price": 7.929999828338623,
+      "sessions_held": 1,
+      "shares": 1,
       "signal_date": "2026-11-12",
-      "signal_type": "unvalidated_price_volume_acceleration",
+      "stop_price": 7.69327,
+      "target_price": 9.70021,
       "ticker": "AMPX"
-    },
-    {
-      "score": 13.7949,
-      "signal_close": 4.329999923706055,
-      "signal_date": "2026-11-12",
-      "signal_type": "unvalidated_price_volume_acceleration",
-      "ticker": "ACHR"
     }
-  ],
-  "positions": {},
+  },
   "schema": 1,
   "starting_cash": 25.0,
   "version": "github_paper_v1"

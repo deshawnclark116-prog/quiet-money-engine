@@ -1,1 +1,2 @@
 ticker,shares,signal_date,entry_date,exit_date,entry_price,exit_price,pnl_usd,return_pct,exit_reason
+ACHR,3,2026-11-12,2026-11-13,2026-11-13,4.382625,4.001775,-1.14255,-8.69,protective_stop

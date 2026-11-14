@@ -1,16 +1,16 @@
 {
   "evaluation": {
-    "cash": 25.0,
-    "closed": 0,
-    "date": "2026-11-12",
-    "equity": 25.0,
+    "cash": 15.4952,
+    "closed": 1,
+    "date": "2026-11-13",
+    "equity": 23.3657,
     "nonempty_feeds": 70,
-    "open": 0,
-    "pending": 2,
+    "open": 1,
+    "pending": 0,
     "scan_count": 71,
     "signals": [],
     "stale_positions": [],
-    "unrealized_pnl": 0.0
+    "unrealized_pnl": -0.4917
   },
   "paper_only": true,
   "source": "daily_bars_not_real_time_bid_ask",
