@@ -7,24 +7,24 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Metric | Value |
 |---|---:|
-| Latest evaluation date | 2026-11-13 |
+| Latest evaluation date | 2026-11-16 |
 | Initial bankroll | $25.00 |
-| Marked portfolio equity | $23.37 |
-| Cash | $15.50 |
-| Total net P&L (marked) | $-1.63 |
-| Total return | -6.54% |
-| SPY passive return (observed period) | -0.36% |
-| Return minus SPY (percentage points) | -6.17 |
-| Current week net P&L (marked) | $-1.63 |
+| Marked portfolio equity | $22.97 |
+| Cash | $22.97 |
+| Total net P&L (marked) | $-2.03 |
+| Total return | -8.13% |
+| SPY passive return (observed period) | -2.27% |
+| Return minus SPY (percentage points) | -5.86 |
+| Current week net P&L (marked) | $-0.40 |
 | Weekly target (not guaranteed) | +$100.00 |
-| Progress against weekly target | -1.6% |
-| Realized P&L | $-1.14 |
-| Unrealized P&L, price marks | $-0.49 |
-| Closed trades | 1 |
+| Progress against weekly target | -0.4% |
+| Realized P&L | $-2.03 |
+| Unrealized P&L, price marks | $+0.00 |
+| Closed trades | 2 |
 | Winning trades | 0 |
 | Closed-trade win rate | 0.0% |
-| Max snapshot-to-snapshot drawdown | 6.54% |
-| Open positions | 1 |
+| Max snapshot-to-snapshot drawdown | 8.13% |
+| Open positions | 0 |
 | Pending next-session entries | 0 |
 | Price feed errors | 0 |
 | Stale position marks | None |
@@ -33,7 +33,7 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Ticker | Shares | Entry | Stop | Target | Opened |
 |---|---:|---:|---:|---:|---|
-| AMPX | 1 | $8.3622 | $7.6933 | $9.7002 | 2026-11-13 |
+| None | — | — | — | — | — |
 
 ## Pending signals
 
@@ -45,6 +45,7 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Ticker | Entry | Exit | Shares | Net P&L | Exit trigger |
 |---|---|---|---:|---:|---|
+| AMPX | 2026-11-13 | 2026-11-16 | 1 | $-0.89 | gap_through_stop |
 | ACHR | 2026-11-13 | 2026-11-13 | 3 | $-1.14 | protective_stop |
 
 ## Evidence and operating rules
