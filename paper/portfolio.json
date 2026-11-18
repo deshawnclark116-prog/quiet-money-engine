@@ -1,7 +1,7 @@
 {
   "benchmark": {
-    "last_close": 732.4400024414062,
-    "last_date": "2026-11-17",
+    "last_close": 730.2000122070312,
+    "last_date": "2026-11-18",
     "start_close": 757.1199951171875,
     "start_date": "2026-11-12",
     "ticker": "SPY"
@@ -58,6 +58,13 @@
     {
       "cash": 22.9687,
       "date": "2026-11-17",
+      "equity": 22.9687,
+      "stale_positions": [],
+      "unrealized_pnl": 0.0
+    },
+    {
+      "cash": 22.9687,
+      "date": "2026-11-18",
       "equity": 22.9687,
       "stale_positions": [],
       "unrealized_pnl": 0.0
@@ -131,7 +138,7 @@
       "ticker": "AMPX"
     }
   ],
-  "last_run_at_utc": "2026-11-18T20:51:33.957466+00:00",
+  "last_run_at_utc": "2026-11-18T22:24:15.115617+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12"
