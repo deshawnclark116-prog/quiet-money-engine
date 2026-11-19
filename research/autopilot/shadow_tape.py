@@ -35,10 +35,9 @@ def ensure(state):
 
 
 def watched_symbols(state):
-    tape=state.get("signal_tape")
-    if not tape:return []
-    if not isinstance(tape,dict) or not isinstance(tape.get("events"),list):
-        raise ValueError("corrupt_signal_tape_fail_closed")
+    if "signal_tape" not in state:
+        return []  # First-ever deployment, not corrupted prior history.
+    tape=ensure(state)  # Also check schema and experiment version.
     # In order of original first observation, not later measured winner.
     symbols=[]
     for event in tape["events"]:
