@@ -106,7 +106,7 @@ class EntryAuditContractTests(unittest.TestCase):
         self.assertEqual(summarize(events,"market_guard")["complete_fills"],0)
 
     def test_missing_benchmark_fails_closed(self):
-        with self.assertRaisesRegex(ValueError,"SPY history"):
+        with self.assertRaisesRegex(ValueError,"SPY historical price basis or coverage"):
             evaluate_all({"AMPX":bars()}, {}, actual_portfolio=None)
 
     def test_short_spy_history_cannot_claim_regime_performance(self):
