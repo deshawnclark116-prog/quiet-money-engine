@@ -1,0 +1,83 @@
+name: stock-entry-quality-research
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "research/autopilot/entry_audit.py"
+      - "research/autopilot/test_entry_audit.py"
+      - ".github/workflows/stock-entry-quality-research.yml"
+  push:
+    paths:
+      - "research/autopilot/entry_audit.py"
+      - "research/autopilot/test_entry_audit.py"
+      - ".github/workflows/stock-entry-quality-research.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Verify leak-safe original-price entry and stop-first contracts
+        run: |
+          python -m unittest discover -s research/autopilot -p 'test_entry_audit.py' -v
+          python -m unittest discover -s research/autopilot -p 'test_paper.py' -v
+
+  retrospective:
+    needs: contracts
+    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PRICE_PROVIDER_ORDER: stooq,yahoo
+      QME_PRICE_FETCH_WORKERS: "5"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Recover authoritative original paper receipts, read-only
+        run: |
+          set -euo pipefail
+          git fetch origin refs/heads/paper-state:refs/remotes/origin/paper-state
+          git show origin/paper-state:paper/portfolio.json > prior_paper_portfolio.json
+          python - <<'PY'
+          import json
+          x=json.load(open("prior_paper_portfolio.json"))
+          assert x["mode"] == "PAPER_ONLY_NO_BROKER"
+          assert float(x["starting_cash"]) == 25.0
+          print("Immutable real paper ledger loaded: ",len(x["closed_trades"]),"closed trades")
+          PY
+      - name: Reconstruct original trades and compare frozen historical entries after 75bps each side
+        run: |
+          python -m research.autopilot.entry_audit \
+            --portfolio prior_paper_portfolio.json \
+            --output-dir entry_quality_output \
+            --days 900
+      - name: Display all historical periods including failures and sample limitations
+        if: always()
+        run: |
+          if [ -f entry_quality_output/entry_quality.md ]; then
+            cat entry_quality_output/entry_quality.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Audit failed or has insufficient historical observations; no conclusion." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Archive all signal-level records, not cherry-picked winners
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-entry-quality-${{ github.run_id }}
+          path: entry_quality_output/
+          retention-days: 30
+          if-no-files-found: warn
