@@ -20,6 +20,7 @@ import csv
 import io
 import time
 import logging
+import math
 from datetime import date, datetime, timedelta, timezone
 
 import requests
@@ -80,44 +81,60 @@ def _safe_float(value, default=0.0) -> float:
 
 
 def _normalize(rows: list, days: int) -> list[dict]:
+    """Return ONLY internally consistent real OHLCV bars.
+
+    Do not mix dividend-adjusted closes with quote/raw OHLC. That had
+    silently invalidated hundreds of SPY and equity history bars, skewing
+    historic momentum / simulated intraday stops. Never invent OHLC values
+    for missing fields: daily-bar execution requires genuine high/low/open.
+    """
     bars = []
+
+    def field(row, *keys):
+        for key in keys:
+            value = row.get(key)
+            if value is not None and value != "":
+                return value
+        return None
 
     for r in rows or []:
         if not isinstance(r, dict):
             continue
 
-        d = r.get("date") or r.get("Date")
+        d = field(r, "date", "Date")
         if not d:
             continue
 
-        close = _safe_float(
-            r.get("adjClose")
-            or r.get("adjustedClose")
-            or r.get("dividendAdjustedClose")
-            or r.get("Close")
-            or r.get("close")
-        )
-
-        if close <= 0:
+        # Prefer complete raw (or split-adjusted-by-provider) OHLC. Yahoo's
+        # adjclose is dividend-adjusted but quote open/high/low is NOT.
+        raw = [field(r, "Open", "open"), field(r, "High", "high"),
+               field(r, "Low", "low"), field(r, "Close", "close")]
+        adj = [field(r, "adjOpen", "adjustedOpen"),
+               field(r, "adjHigh", "adjustedHigh"),
+               field(r, "adjLow", "adjustedLow"),
+               field(r, "adjClose", "adjustedClose", "dividendAdjustedClose")]
+        source = raw if all(x is not None for x in raw) else (
+            adj if all(x is not None for x in adj) else None)
+        if source is None:
+            continue
+        try:
+            op, high, low, close = [float(x) for x in source]
+            volume_raw = field(r, "Volume", "volume", "adjVolume")
+            volume = float(volume_raw) if volume_raw is not None else 0.0
+            date.fromisoformat(str(d)[:10])
+        except (ValueError, TypeError, OverflowError):
+            continue
+        if (not all(math.isfinite(x) for x in (op,high,low,close,volume))
+                or low<=0 or volume<0
+                or not low <= min(op,close) <= max(op,close) <= high):
             continue
 
-        open_price = _safe_float(r.get("Open") or r.get("open"), close)
-        high = _safe_float(r.get("High") or r.get("high"), close)
-        low = _safe_float(r.get("Low") or r.get("low"), close)
-        volume = _safe_float(r.get("adjVolume") or r.get("Volume") or r.get("volume"), 0)
+        bars.append({
+            "date":str(d)[:10],
+            "open":op,"high":high,"low":low,"close":close,"volume":volume
+        })
 
-        bars.append(
-            {
-                "date": str(d)[:10],
-                "open": open_price,
-                "high": high,
-                "low": low,
-                "close": close,
-                "volume": volume,
-            }
-        )
-
-    bars.sort(key=lambda b: b["date"])
+    bars.sort(key=lambda bar:bar["date"])
     return bars[-days:]
 
 
@@ -199,7 +216,7 @@ def _from_yahoo(ticker: str, days: int) -> list[dict]:
             "period2": period2,
             "interval": "1d",
             "events": "history",
-            "includeAdjustedClose": "true",
+            "includeAdjustedClose": "false",
         }
 
         headers = {
@@ -229,9 +246,6 @@ def _from_yahoo(ticker: str, days: int) -> list[dict]:
                 continue
 
             quote = quote_list[0]
-            adjclose_list = indicators.get("adjclose") or []
-            adjclose = adjclose_list[0].get("adjclose") if adjclose_list else []
-
             rows = []
 
             opens = quote.get("open") or []
@@ -241,29 +255,22 @@ def _from_yahoo(ticker: str, days: int) -> list[dict]:
             volumes = quote.get("volume") or []
 
             for i, ts in enumerate(timestamps):
-                close = None
-
-                if i < len(adjclose):
-                    close = adjclose[i]
-
-                if close is None and i < len(closes):
-                    close = closes[i]
-
-                if close is None:
+                # The quote close is from the SAME price basis as the quote
+                # open/high/low. Dividend-adjusted adjclose is deliberately
+                # ignored to avoid false OHLC ranges and stop-price triggers.
+                if not all(i < len(v) and v[i] is not None
+                           for v in (opens, highs, lows, closes)):
                     continue
-
-                d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
-
-                row = {
-                    "date": d,
-                    "open": opens[i] if i < len(opens) and opens[i] is not None else close,
-                    "high": highs[i] if i < len(highs) and highs[i] is not None else close,
-                    "low": lows[i] if i < len(lows) and lows[i] is not None else close,
-                    "close": close,
-                    "volume": volumes[i] if i < len(volumes) and volumes[i] is not None else 0,
-                }
-
-                rows.append(row)
+                try:
+                    d = datetime.fromtimestamp(ts, tz=timezone.utc).date().isoformat()
+                except (OverflowError, ValueError, TypeError, OSError):
+                    continue
+                rows.append({
+                    "date":d,
+                    "open":opens[i],"high":highs[i],
+                    "low":lows[i],"close":closes[i],
+                    "volume":volumes[i] if i<len(volumes) and volumes[i] is not None else 0,
+                })
 
             bars = _normalize(rows, days)
 
