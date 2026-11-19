@@ -109,6 +109,10 @@ class EntryAuditContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,"SPY history"):
             evaluate_all({"AMPX":bars()}, {}, actual_portfolio=None)
 
+    def test_short_spy_history_cannot_claim_regime_performance(self):
+        with self.assertRaisesRegex(ValueError,"historical price basis or coverage"):
+            evaluate_all({"SPY":bars(120)}, {}, actual_portfolio=None)
+
     def test_reference_portfolio_is_read_only(self):
         original={"mode":"PAPER_ONLY_NO_BROKER","closed_trades":[
             {"ticker":"ACHR","entry_date":"2026-11-13",
@@ -116,7 +120,7 @@ class EntryAuditContractTests(unittest.TestCase):
              "entry_price":4.382625,"exit_price":4.001775,
              "pnl_usd":-1.14255,"return_pct":-8.69,
              "exit_reason":"protective_stop"}]}
-        result=evaluate_all({"SPY":bars(120)}, {}, actual_portfolio=original)
+        result=evaluate_all({"SPY":bars(520)}, {}, actual_portfolio=original)
         self.assertEqual(result["known_first_losers"][0]["ticker"],"ACHR")
         self.assertNotIn("paper_order",result)
         self.assertEqual(original["closed_trades"][0]["pnl_usd"],-1.14255)
