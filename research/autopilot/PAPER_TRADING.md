@@ -79,3 +79,26 @@ GitHub Actions `workflow_run` also wakes the paper portfolio after a successful
 scheduled `autonomous-research-radar` run on the main branch. This couples the
 research completion signal to the paper processor and reduces dependence on
 GitHub cron reliability; each completed session is processed idempotently.
+
+## Prospective entry-quality shadow tape
+
+The `paper-state/paper/shadow_forward.json` archive is a **read-only,
+forward-only research ledger**. The first observed completed bar determines
+whether a stock qualifies under the unchanged baseline and under frozen
+alternative no-chase / SPY-regime hypotheses. We capture ALL qualifying
+price signals from the scanned cohort, including names excluded by the two
+available paper-portfolio slots. For each name, prices continue being
+retrieved even if that ticker drops from the next week's random scan.
+
+Only after seven subsequent completed trading-session bars exist do we
+attach a shadow hypothetical exit, with the same 75bps-each-way costs and
+stop-first assumptions as the original paper model. Incomplete/missing
+prices remain unknown. These shadow outcomes are **not executed orders**,
+not a deployable trading recommendation and not independent observations
+if multiple names respond to the same market move. No earlier signals
+are retrospectively inserted when the tape is first installed.
+
+Improvement requires future, date-separated net expectancy, matched cohort
+comparison, realistic fills, market-relative return, and documented
+uncertainty; the Nov 2026 losses and historical research have already
+been consumed and cannot alone authorize changing the champion.

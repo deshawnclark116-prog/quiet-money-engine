@@ -12,6 +12,8 @@ on:
     paths:
       - "research/autopilot/paper.py"
       - "research/autopilot/paper_runner.py"
+      - "research/autopilot/shadow_tape.py"
+      - "research/autopilot/test_shadow_tape.py"
       - "research/autopilot/test_paper.py"
       - ".github/workflows/github-paper-trader.yml"
       - "data_layer.py"
@@ -19,6 +21,8 @@ on:
     paths:
       - "research/autopilot/paper.py"
       - "research/autopilot/paper_runner.py"
+      - "research/autopilot/shadow_tape.py"
+      - "research/autopilot/test_shadow_tape.py"
       - "research/autopilot/test_paper.py"
       - ".github/workflows/github-paper-trader.yml"
       - "data_layer.py"
@@ -126,7 +130,7 @@ jobs:
           fi
           mkdir -p paper
           cp /tmp/qme-paper-snapshot/* paper/
-          git add paper/portfolio.json paper/dashboard.md paper/latest_run.json paper/closed_trades.csv paper/equity_history.csv
+          git add paper/portfolio.json paper/dashboard.md paper/latest_run.json paper/closed_trades.csv paper/equity_history.csv paper/shadow_forward.json
           if git diff --cached --quiet; then
             echo "No portfolio changes."
           else
