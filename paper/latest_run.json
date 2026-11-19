@@ -4,6 +4,14 @@
     "closed": 2,
     "date": "2026-11-18",
     "equity": 22.9687,
+    "forward_shadow": {
+      "new_signals": 0,
+      "newly_resolved": 0,
+      "pending": 0,
+      "resolved": 0,
+      "total_recorded": 0,
+      "version": "prospective_shadow_entry_v1"
+    },
     "nonempty_feeds": 70,
     "open": 0,
     "pending": 0,

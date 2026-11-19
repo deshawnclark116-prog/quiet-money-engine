@@ -28,6 +28,8 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 | Pending next-session entries | 0 |
 | Price feed errors | 0 |
 | Stale position marks | None |
+| Forward research signals logged | 0 |
+| Shadow outcomes resolved | 0 |
 
 ## Open positions
 
