@@ -198,8 +198,8 @@ def summarize(events, arm):
 
 
 def evaluate_all(history, invalid_counts, *, actual_portfolio=None):
-    if "SPY" not in history or len(history["SPY"]) < 110:
-        raise ValueError("SPY history absent; market-regime experiment must fail closed")
+    if "SPY" not in history or len(history["SPY"]) < 500:
+        raise ValueError("SPY historical price basis or coverage insufficient; fail closed")
     spy_rows=history["SPY"]
     spy={"bars":spy_rows,
          "by_date":{x["date"]:i for i,x in enumerate(spy_rows)}}
@@ -252,6 +252,7 @@ def evaluate_all(history, invalid_counts, *, actual_portfolio=None):
             "Same-day OHLC stop first is deliberately pessimistic but may not represent executable fills.",
             "A filtered event sample is not a $25 two-position whole-share portfolio backtest.",
             "Multiple arms are exploratory comparisons, not a search-backed right to promote.",
+            "Historical per-ticker cooldown is NOT an exact reproduction of a bot initialized Nov 12; observed actual trades come only from paper-state.",
             "No verified company events, marketable quotes, broker fees, taxes or real fills.",
         ]
     }
