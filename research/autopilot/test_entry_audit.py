@@ -72,7 +72,7 @@ class EntryAuditContractTests(unittest.TestCase):
 
     def test_gap_through_stop_uses_open_not_stop(self):
         data=bars(115)
-        data[106].update(open=4.0,low=3.9,high=4.2,close=4.1)
+        data[107].update(open=4.0,low=3.9,high=4.2,close=4.1)
         x=paper_fill_outcome(data,105)
         self.assertEqual(x["exit_reason"],"gap_through_stop")
         self.assertLess(x["net_return_pct"],-15.)
