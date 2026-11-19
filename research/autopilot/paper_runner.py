@@ -17,6 +17,7 @@ import sys
 from data_layer import get_price_history
 from research.autopilot.run import DEFAULT_ANCHORS, universe
 from research.autopilot.paper import VERSION, fresh_state, step, validate_state
+from research.autopilot.shadow_tape import watched_symbols, update_tape, ensure as ensure_tape
 
 
 def report(state, result, failures, benchmark=None):
@@ -75,6 +76,8 @@ def report(state, result, failures, benchmark=None):
         f"| Pending next-session entries | {len(state['pending_entries'])} |",
         f"| Price feed errors | {len(failures)} |",
         f"| Stale position marks | {', '.join(result['stale_positions']) or 'None'} |",
+        f"| Forward research signals logged | {result.get('forward_shadow',{}).get('total_recorded',0)} |",
+        f"| Shadow outcomes resolved | {result.get('forward_shadow',{}).get('resolved',0)} |",
         "",
         "## Open positions", "",
         "| Ticker | Shares | Entry | Stop | Target | Opened |",
@@ -123,6 +126,8 @@ def save(state, result, errors, outdir):
     folder=Path(outdir)
     folder.mkdir(parents=True,exist_ok=True)
     (folder/"portfolio.json").write_text(json.dumps(state,indent=2,sort_keys=True)+"\n")
+    (folder/"shadow_forward.json").write_text(json.dumps(
+        ensure_tape(state),indent=2,sort_keys=True)+"\n")
     (folder/"dashboard.md").write_text(report(state,result,errors)+"\n")
     (folder/"latest_run.json").write_text(json.dumps(
         {"version":VERSION,"evaluation":result,"source_errors":errors,
@@ -151,7 +156,11 @@ def run(state, *, now=None, tickers=None, provider=None, max_symbols=70):
     provider=provider or get_price_history
     tickers=tickers if tickers is not None else universe(
         moment,max_symbols,os.getenv("QME_AUTOPILOT_ANCHORS",DEFAULT_ANCHORS))
-    extra=list(state["positions"]) + [p["ticker"] for p in state["pending_entries"]]
+    # Continue tracking SHADOW candidates until their 7-session outcomes
+    # mature, even if the random 70-stock research cohort changes next week.
+    extra=(list(state["positions"]) +
+           [p["ticker"] for p in state["pending_entries"]] +
+           watched_symbols(state))
     all_tickers=list(dict.fromkeys([*tickers,*extra,"SPY"]))
     observations={}
     errors=[]
@@ -166,6 +175,9 @@ def run(state, *, now=None, tickers=None, provider=None, max_symbols=70):
     if not any(observations.values()):
         raise RuntimeError("all_price_providers_failed_no_portfolio_state_change")
     result=step(state,observations,now)
+    # Side-car research observations: never authorize, suppress, or place
+    # ANY paper trade. Only attach future results after completed bars.
+    result["forward_shadow"]=update_tape(state,observations,now,result["date"])
     result["scan_count"]=len(all_tickers)
     result["nonempty_feeds"]=sum(bool(v) for v in observations.values())
     return result, errors
