@@ -91,7 +91,16 @@ def find_candidates(history):
             if f is None:continue
             coverage["eligible_ticker_days"]+=1
             values=scores(f)
-            old=_signal(ticker,bars[:i+1],day+"T23:30:00+00:00",day)
+            # Conservative necessary-condition fast gate ONLY. Actual
+            # incumbent decision is still fully delegated to _signal.
+            # Bounds include 1e-5 tolerance for triage's 5-decimal round.
+            old=None
+            if (.01999<=f["return5"]<=.12001 and
+                -.10001<=f["return20"]<=.20001):
+                vv=[row["volume"] for row in bars[i-24:i+1]]
+                vr=median(vv[-5:])/max(1,median(vv[-25:-5]))
+                if vr>=1.249 and vv[-1]>=median(vv[-20:]):
+                    old=_signal(ticker,bars[:i+1],day+"T23:30:00+00:00",day)
             if old:values["incumbent"]=old["score"]
             values["placebo"]=0.
             for arm,score in values.items():
