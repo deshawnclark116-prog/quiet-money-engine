@@ -152,7 +152,7 @@
       "ticker": "AMPX"
     }
   ],
-  "last_run_at_utc": "2026-11-20T22:00:22.718890+00:00",
+  "last_run_at_utc": "2026-11-21T04:10:43.213596+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12"
@@ -163,7 +163,7 @@
   "schema": 1,
   "signal_tape": {
     "events": [],
-    "last_observation_utc": "2026-11-20T22:00:22.718890+00:00",
+    "last_observation_utc": "2026-11-21T04:10:43.213596+00:00",
     "schema": 1,
     "version": "prospective_shadow_entry_v1"
   },
