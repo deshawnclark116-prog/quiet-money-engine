@@ -7,17 +7,17 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Metric | Value |
 |---|---:|
-| Latest evaluation date | 2026-11-20 |
+| Latest evaluation date | 2026-11-23 |
 | Initial bankroll | $25.00 |
 | Marked portfolio equity | $22.97 |
 | Cash | $22.97 |
 | Total net P&L (marked) | $-2.03 |
 | Total return | -8.13% |
-| SPY passive return (observed period) | -8.89% |
-| Return minus SPY (percentage points) | +0.77 |
-| Current week net P&L (marked) | $-0.40 |
+| SPY passive return (observed period) | -4.60% |
+| Return minus SPY (percentage points) | -3.52 |
+| Current week net P&L (marked) | $+0.00 |
 | Weekly target (not guaranteed) | +$100.00 |
-| Progress against weekly target | -0.4% |
+| Progress against weekly target | 0.0% |
 | Realized P&L | $-2.03 |
 | Unrealized P&L, price marks | $+0.00 |
 | Closed trades | 2 |
@@ -25,10 +25,10 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 | Closed-trade win rate | 0.0% |
 | Max snapshot-to-snapshot drawdown | 8.13% |
 | Open positions | 0 |
-| Pending next-session entries | 0 |
+| Pending next-session entries | 1 |
 | Price feed errors | 0 |
 | Stale position marks | None |
-| Forward research signals logged | 0 |
+| Forward research signals logged | 1 |
 | Shadow outcomes resolved | 0 |
 
 ## Open positions
@@ -41,7 +41,7 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Ticker | Recorded session | Close when signaled |
 |---|---|---:|
-| None | — | — |
+| POWW | 2026-11-23 | $2.6100 |
 
 ## Most recent closed paper trades
 

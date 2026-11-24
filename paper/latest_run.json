@@ -2,21 +2,23 @@
   "evaluation": {
     "cash": 22.968725,
     "closed": 2,
-    "date": "2026-11-20",
+    "date": "2026-11-23",
     "equity": 22.9687,
     "forward_shadow": {
-      "new_signals": 0,
+      "new_signals": 1,
       "newly_resolved": 0,
-      "pending": 0,
+      "pending": 1,
       "resolved": 0,
-      "total_recorded": 0,
+      "total_recorded": 1,
       "version": "prospective_shadow_entry_v1"
     },
     "nonempty_feeds": 70,
     "open": 0,
-    "pending": 0,
+    "pending": 1,
     "scan_count": 71,
-    "signals": [],
+    "signals": [
+      "POWW"
+    ],
     "stale_positions": [],
     "unrealized_pnl": 0.0
   },

@@ -1,6 +1,28 @@
 {
-  "events": [],
-  "last_observation_utc": "2026-11-21T08:14:54.365947+00:00",
+  "events": [
+    {
+      "first_observed_utc": "2026-11-24T00:16:16.981837+00:00",
+      "hypotheses_recorded_before_outcomes": {
+        "both": false,
+        "incumbent": true,
+        "market_guard": false,
+        "no_chase_8": false
+      },
+      "note": "Shadow only: not an executed or funded trade",
+      "outcome": null,
+      "return_20d_pct": 5.24193,
+      "return_5d_pct": 10.12658,
+      "score": 15.8521,
+      "signal_close": 2.61,
+      "signal_date": "2026-11-23",
+      "spy_return_5d_pct": -2.38665,
+      "status": "awaiting_seven_sessions",
+      "ticker": "POWW",
+      "volume_ratio": 2.41199,
+      "was_selected_by_live_paper": true
+    }
+  ],
+  "last_observation_utc": "2026-11-24T00:16:16.981837+00:00",
   "schema": 1,
   "version": "prospective_shadow_entry_v1"
 }
