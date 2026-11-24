@@ -5,7 +5,7 @@
     "date": "2026-11-23",
     "equity": 22.9687,
     "forward_shadow": {
-      "new_signals": 1,
+      "new_signals": 0,
       "newly_resolved": 0,
       "pending": 1,
       "resolved": 0,
@@ -16,9 +16,7 @@
     "open": 0,
     "pending": 1,
     "scan_count": 71,
-    "signals": [
-      "POWW"
-    ],
+    "signals": [],
     "stale_positions": [],
     "unrealized_pnl": 0.0
   },
