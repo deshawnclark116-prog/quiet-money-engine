@@ -1,12 +1,12 @@
 {
   "benchmark": {
-    "last_close": 722.2899780273438,
-    "last_date": "2026-11-23",
+    "last_close": 718.780029296875,
+    "last_date": "2026-11-24",
     "start_close": 757.1199951171875,
     "start_date": "2026-11-12",
     "ticker": "SPY"
   },
-  "cash": 22.968725,
+  "cash": 9.720099,
   "closed_trades": [
     {
       "entry_date": "2026-11-13",
@@ -89,6 +89,13 @@
       "equity": 22.9687,
       "stale_positions": [],
       "unrealized_pnl": 0.0
+    },
+    {
+      "cash": 9.7201,
+      "date": "2026-11-24",
+      "equity": 24.0121,
+      "stale_positions": [],
+      "unrealized_pnl": 1.0434
     }
   ],
   "events": [
@@ -166,25 +173,41 @@
       "signal_date": "2026-11-23",
       "signal_type": "unvalidated_price_volume_acceleration",
       "ticker": "POWW"
+    },
+    {
+      "entry_cost": 13.248626,
+      "entry_date": "2026-11-24",
+      "entry_price": 2.649725,
+      "kind": "ENTRY",
+      "seq": 8,
+      "shares": 5,
+      "signal_date": "2026-11-23",
+      "ticker": "POWW"
     }
   ],
-  "last_run_at_utc": "2026-11-24T10:52:20.201184+00:00",
+  "last_run_at_utc": "2026-11-24T22:43:01.533816+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12",
     "POWW": "2026-11-23"
   },
   "mode": "PAPER_ONLY_NO_BROKER",
-  "pending_entries": [
-    {
-      "score": 15.8521,
-      "signal_close": 2.609999895095825,
+  "pending_entries": [],
+  "positions": {
+    "POWW": {
+      "entry_cost": 13.248626,
+      "entry_date": "2026-11-24",
+      "entry_price": 2.649725,
+      "last_evaluated_date": "2026-11-24",
+      "last_mark_price": 2.880000114440918,
+      "sessions_held": 1,
+      "shares": 5,
       "signal_date": "2026-11-23",
-      "signal_type": "unvalidated_price_volume_acceleration",
+      "stop_price": 2.437747,
+      "target_price": 3.073681,
       "ticker": "POWW"
     }
-  ],
-  "positions": {},
+  },
   "schema": 1,
   "signal_tape": {
     "events": [
@@ -210,7 +233,7 @@
         "was_selected_by_live_paper": true
       }
     ],
-    "last_observation_utc": "2026-11-24T10:52:20.201184+00:00",
+    "last_observation_utc": "2026-11-24T22:43:01.533816+00:00",
     "schema": 1,
     "version": "prospective_shadow_entry_v1"
   },
