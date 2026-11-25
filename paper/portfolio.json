@@ -185,7 +185,7 @@
       "ticker": "POWW"
     }
   ],
-  "last_run_at_utc": "2026-11-25T05:36:09.737232+00:00",
+  "last_run_at_utc": "2026-11-25T09:47:38.453496+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12",
@@ -233,7 +233,7 @@
         "was_selected_by_live_paper": true
       }
     ],
-    "last_observation_utc": "2026-11-25T05:36:09.737232+00:00",
+    "last_observation_utc": "2026-11-25T09:47:38.453496+00:00",
     "schema": 1,
     "version": "prospective_shadow_entry_v1"
   },
