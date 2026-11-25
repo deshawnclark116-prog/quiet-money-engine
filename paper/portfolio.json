@@ -1,7 +1,7 @@
 {
   "benchmark": {
-    "last_close": 718.780029296875,
-    "last_date": "2026-11-24",
+    "last_close": 716.7000122070312,
+    "last_date": "2026-11-25",
     "start_close": 757.1199951171875,
     "start_date": "2026-11-12",
     "ticker": "SPY"
@@ -96,6 +96,13 @@
       "equity": 24.0121,
       "stale_positions": [],
       "unrealized_pnl": 1.0434
+    },
+    {
+      "cash": 9.7201,
+      "date": "2026-11-25",
+      "equity": 23.2677,
+      "stale_positions": [],
+      "unrealized_pnl": 0.299
     }
   ],
   "events": [
@@ -185,7 +192,7 @@
       "ticker": "POWW"
     }
   ],
-  "last_run_at_utc": "2026-11-25T09:47:38.453496+00:00",
+  "last_run_at_utc": "2026-11-25T21:56:48.311907+00:00",
   "last_signal_date": {
     "ACHR": "2026-11-12",
     "AMPX": "2026-11-12",
@@ -198,9 +205,9 @@
       "entry_cost": 13.248626,
       "entry_date": "2026-11-24",
       "entry_price": 2.649725,
-      "last_evaluated_date": "2026-11-24",
-      "last_mark_price": 2.880000114440918,
-      "sessions_held": 1,
+      "last_evaluated_date": "2026-11-25",
+      "last_mark_price": 2.7300000190734863,
+      "sessions_held": 2,
       "shares": 5,
       "signal_date": "2026-11-23",
       "stop_price": 2.437747,
@@ -233,7 +240,7 @@
         "was_selected_by_live_paper": true
       }
     ],
-    "last_observation_utc": "2026-11-25T09:47:38.453496+00:00",
+    "last_observation_utc": "2026-11-25T21:56:48.311907+00:00",
     "schema": 1,
     "version": "prospective_shadow_entry_v1"
   },
