@@ -2,8 +2,8 @@
   "evaluation": {
     "cash": 9.720099,
     "closed": 2,
-    "date": "2026-11-25",
-    "equity": 23.2677,
+    "date": "2026-11-27",
+    "equity": 23.4166,
     "forward_shadow": {
       "new_signals": 0,
       "newly_resolved": 0,
@@ -18,7 +18,7 @@
     "scan_count": 71,
     "signals": [],
     "stale_positions": [],
-    "unrealized_pnl": 0.299
+    "unrealized_pnl": 0.4479
   },
   "paper_only": true,
   "source": "daily_bars_not_real_time_bid_ask",

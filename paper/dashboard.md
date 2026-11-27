@@ -7,19 +7,19 @@ The strategy is unvalidated. This is NOT an investment performance claim.
 
 | Metric | Value |
 |---|---:|
-| Latest evaluation date | 2026-11-25 |
+| Latest evaluation date | 2026-11-27 |
 | Initial bankroll | $25.00 |
-| Marked portfolio equity | $23.27 |
+| Marked portfolio equity | $23.42 |
 | Cash | $9.72 |
-| Total net P&L (marked) | $-1.73 |
-| Total return | -6.93% |
-| SPY passive return (observed period) | -5.34% |
-| Return minus SPY (percentage points) | -1.59 |
-| Current week net P&L (marked) | $+0.30 |
+| Total net P&L (marked) | $-1.58 |
+| Total return | -6.33% |
+| SPY passive return (observed period) | -3.80% |
+| Return minus SPY (percentage points) | -2.53 |
+| Current week net P&L (marked) | $+0.45 |
 | Weekly target (not guaranteed) | +$100.00 |
-| Progress against weekly target | 0.3% |
+| Progress against weekly target | 0.4% |
 | Realized P&L | $-2.03 |
-| Unrealized P&L, price marks | $+0.30 |
+| Unrealized P&L, price marks | $+0.45 |
 | Closed trades | 2 |
 | Winning trades | 0 |
 | Closed-trade win rate | 0.0% |
